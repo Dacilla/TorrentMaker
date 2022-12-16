@@ -60,10 +60,28 @@ def main():
     if result not in [1, 2]:
         logging.error("Input not a file or directory")
         sys.exit()
-    logging.info(f"Creating mediainfo dump in {DUMPFILE}...")
+    if not os.path.isdir("runs"):
+        os.mkdir("runs")
+        os.mkdir(f"runs{os.sep}001")
+        runDir = os.getcwd() + os.sep + "runs" + os.sep + "001" + os.sep
+    elif not has_folders("runs"):
+        os.mkdir(f"runs{os.sep}001")
+        runDir = os.getcwd() + os.sep + "runs" + os.sep + "001" + os.sep
+    else:
+        fileList = os.listdir("runs")
+        maxValue = max(int(dirname) for dirname in fileList)
+        maxValue = str(maxValue).zfill(3)
+        logging.info("Last run number found: " + str(maxValue))
+        if len(os.listdir("runs" + os.sep + str(maxValue))) == 0:
+            runDir = os.getcwd() + os.sep + "runs" + os.sep + str(maxValue) + os.sep
+        else:
+            runDir = os.getcwd() + os.sep + "runs" + os.sep + str(maxValue + 1) + os.sep
+
+    logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
+    logging.info(f"Creating mediainfo dump in {runDir + DUMPFILE}...")
     if result == 1:
         videoFile = path
-        info = getInfoDump(path)
+        info = getInfoDump(path, runDir)
     elif result == 2:
         # List all files in the folder
         files = os.listdir(path)
@@ -78,7 +96,7 @@ def main():
             if ext in ['.mp4', '.avi', '.mkv']:
                 # Found a video file
                 videoFile = path + os.sep + file
-                info = getInfoDump(path + os.sep + file)
+                info = getInfoDump(path + os.sep + file, runDir)
                 break
     logging.info("Mediainfo dump created")
 
@@ -106,17 +124,17 @@ def main():
 
         # Print the description of the TV show
         logging.debug("description gotten: " + data['overview'])
-        with open("showDesc.txt", "w") as fb:
+        with open(runDir + "showDesc.txt", "w") as fb:
             fb.write(data['overview'] + "\n\n")
         logging.info("TMDB Description dumped to showDesc.txt")
 
     logging.info("Making screenshots...")
-    if not os.path.isdir("screenshots"):
-        os.mkdir("screenshots")
+    if not os.path.isdir(runDir + "screenshots"):
+        os.mkdir(runDir + "screenshots")
     else:
-        files = os.listdir("screenshots")
+        files = os.listdir(runDir + "screenshots")
         for i in files:
-            os.remove("screenshots" + os.sep + i)
+            os.remove(runDir + "screenshots" + os.sep + i)
 
     video = cv2.VideoCapture(videoFile)
     # Get the total duration of the video in seconds
@@ -136,8 +154,8 @@ def main():
         success, image = video.read()
         if success:
             # Save the image to a file
-            cv2.imwrite(f"screenshots{os.sep}" + "screenshot_{}.png".format(timestamp), image)
-            logging.info(f"Screenshot made at screenshots{os.sep}" + "screenshot_{}.png".format(timestamp))
+            cv2.imwrite(runDir + f"screenshots{os.sep}" + "screenshot_{}.png".format(timestamp), image)
+            logging.info(f"Screenshot made at {runDir}screenshots{os.sep}" + "screenshot_{}.png".format(timestamp))
 
     if arg.upload:
         logging.info("Uploading screenshots to imgbb")
@@ -147,13 +165,12 @@ def main():
         with open("imgbbApi.txt", "r") as bb:
             imgbbAPI = bb.read()
         api_endpoint = "https://api.imgbb.com/1/upload"
-        images = os.listdir("screenshots")
+        images = os.listdir(f"{runDir}screenshots{os.sep}")
         logging.info("Screenshots loaded...")
-        UrlList = []
         for image in images:
             logging.info(f"Uploading {image}")
             # Open the file and read the data
-            filePath = "screenshots" + os.sep + image
+            filePath = runDir + "screenshots" + os.sep + image
             with open(filePath, "rb") as file:
                 file_data = file.read()
             # Set the payload for the POST request
@@ -174,17 +191,40 @@ def main():
                 # Print the image URL
                 # Template: [url=https://ibb.co/0fbvMqH][img]https://i.ibb.co/0fbvMqH/screenshot-785-895652173913.png[/img][/url]
                 bbcode = f"[url={image_url_viewer}][img]{image_url}[/img][/url]"
-                with open("showDesc.txt", "a") as fileAdd:
+                with open(runDir + "showDesc.txt", "a") as fileAdd:
                     fileAdd.write(bbcode + "\n")
                 logging.info(f"bbcode for image URL {image_url} added to showDesc.txt")
             except Exception as e:
                 logging.critical("Unexpected Exception: " + e)
                 continue
-    
+
     logging.info("Creating torrent file")
     torrent = torf.Torrent()
     torrent.private = True
-    # using the same result variable from way earlier to tell if path is a file or folder
+    torrent.source = "HUNO"
+    with open("trackerURL.txt", "r") as t:
+        torrent.trackers = t.readlines()
+    torrent.path = path
+    logging.info("Generating torrent file hash. This will take a long while...")
+    success = torrent.generate(callback=cb, interval=1)
+    logging.info("Writing torrent file to disk...")
+    torrent.write(runDir + "generatedTorrent.torrent")
+    logging.info("Torrent file wrote to generatedTorrent.torrent")
+
+
+def folders_in(path_to_parent):
+    for fname in os.listdir(path_to_parent):
+        if os.path.isdir(os.path.join(path_to_parent, fname)):
+            yield os.path.join(path_to_parent, fname)
+
+
+def has_folders(path_to_parent):
+    folders = list(folders_in(path_to_parent))
+    return len(folders) != 0
+
+
+def cb(torrent, filepath, pieces_done, pieces_total):
+    print(f'{pieces_done/pieces_total*100:3.0f} % done', end="\r")
 
 
 def FileOrFolder(path: str):
@@ -197,14 +237,15 @@ def FileOrFolder(path: str):
         return 0
 
 
-def getInfoDump(filePath: str):
+def getInfoDump(filePath: str, runDir: str):
     output = MediaInfo.parse(filename=filePath, output="", full=False)
     logging.debug(output)
     # don't ask, the output looks fine in the terminal, but writing it
     # to a file adds empty lines every second line. This deletes them
-    with open(DUMPFILE, "w") as f:
+    logging.info("Creating mediainfo dump at " + runDir + DUMPFILE)
+    with open(runDir + DUMPFILE, "w") as f:
         f.write(output)
-    with open(DUMPFILE, "r") as fi:
+    with open(runDir + DUMPFILE, "r") as fi:
         # Get the lines from the file
         lines = fi.readlines()
 
@@ -219,10 +260,11 @@ def getInfoDump(filePath: str):
                 new_lines.append(line)
 
     # Open the file in write mode
-    with open(DUMPFILE, 'w') as fo:
+    with open(runDir + DUMPFILE, 'w') as fo:
         # Write the modified lines to the file
         for line in new_lines:
             fo.write(line)
+
 
 if __name__ == "__main__":
     main()

@@ -135,3 +135,5 @@ tmdbApi.txt
 showDesc.txt
 screenshots
 imgbbApi.txt
+trackerURL.txt
+*.torrent
