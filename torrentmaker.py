@@ -70,12 +70,11 @@ def main():
     else:
         fileList = os.listdir("runs")
         maxValue = max(int(dirname) for dirname in fileList)
-        maxValue = str(maxValue).zfill(3)
         logging.info("Last run number found: " + str(maxValue))
-        if len(os.listdir("runs" + os.sep + str(maxValue))) == 0:
-            runDir = os.getcwd() + os.sep + "runs" + os.sep + str(maxValue) + os.sep
-        else:
-            runDir = os.getcwd() + os.sep + "runs" + os.sep + str(maxValue + 1) + os.sep
+        maxValue = maxValue + 1
+        maxValue = str(maxValue).zfill(3)
+        os.mkdir("runs" + os.sep + maxValue)
+        runDir = os.getcwd() + os.sep + "runs" + os.sep + maxValue + os.sep
 
     logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
     logging.info(f"Creating mediainfo dump in {runDir + DUMPFILE}...")
