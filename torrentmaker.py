@@ -5,9 +5,16 @@ import sys
 import requests
 import cv2
 import torf
+import qbittorrentapi
+import json
+import re
+import shutil
 
+from babel import Locale
+from pprint import pprint, pformat
 from base64 import b64encode
 from pymediainfo import MediaInfo
+from datetime import datetime
 
 __VERSION = "1.0.0"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
@@ -34,11 +41,39 @@ def main():
         default=None
     )
     parser.add_argument(
+        "-g", "--group",
+        action="store",
+        type=str,
+        help="Group name of the torrent creator",
+        default=None
+    )
+    parser.add_argument(
+        "-s", "--source",
+        action="store",
+        type=str,
+        help="Source of the torrent files (E.g. Bluray Remux, WEB-DL)",
+        default=None
+    )
+    parser.add_argument(
+        "--audio",
+        action="store",
+        type=str,
+        help="Audio Codec. Will be replaced for auto detection soon",
+        default=None
+    )
+    parser.add_argument(
         "-u",
         "--upload",
         action="store_true",
         default=False,
         help="Enable to upload generated screenshots to imgbb automatically"
+    )
+    parser.add_argument(
+        "-i",
+        "--inject",
+        action="store_true",
+        default=False,
+        help="Enable to automatically inject torrent file to qbittorrent"
     )
     parser.add_argument(
         "-D", "--debug", action="store_true", help="debug mode", default=False
@@ -71,6 +106,9 @@ def main():
         fileList = os.listdir("runs")
         maxValue = max(int(dirname) for dirname in fileList)
         logging.info("Last run number found: " + str(maxValue))
+        # if not delete_if_no_torrent(os.getcwd() + os.sep + "runs" + os.sep + str(maxValue).zfill(3)):
+        #     maxValue = maxValue + 1
+        #     logging.info("Found directory does not have finished .torrent file. Directory Deleted.")
         maxValue = maxValue + 1
         maxValue = str(maxValue).zfill(3)
         os.mkdir("runs" + os.sep + maxValue)
@@ -80,7 +118,7 @@ def main():
     logging.info(f"Creating mediainfo dump in {runDir + DUMPFILE}...")
     if result == 1:
         videoFile = path
-        info = getInfoDump(path, runDir)
+        mediaInfoText = getInfoDump(path, runDir)
     elif result == 2:
         # List all files in the folder
         files = os.listdir(path)
@@ -95,17 +133,18 @@ def main():
             if ext in ['.mp4', '.avi', '.mkv']:
                 # Found a video file
                 videoFile = path + os.sep + file
-                info = getInfoDump(path + os.sep + file, runDir)
+                mediaInfoText = getInfoDump(path + os.sep + file, runDir)
+                logging.debug(pformat(json.loads(mediaInfoText)))
                 break
     logging.info("Mediainfo dump created")
-
-    if arg.tmdb is not None:
+    mediaInfoText = mediaInfoText.strip()
+    mediaInfoText = json.loads(mediaInfoText)
+    if arg.tmdb:
         if not os.path.isfile(os.getcwd() + os.sep + APIKEYFILE):
             logging.error(f"{APIKEYFILE} does not exist")
             sys.exit()
         # Get TMDB info
         logging.info("Getting TMDB description")
-        # Replace YOUR_API_KEY with your TMDb API key
         with open(APIKEYFILE) as fa:
             api_key = fa.read()
 
@@ -119,12 +158,13 @@ def main():
         response = requests.get(url)
 
         # Get the JSON data from the response
-        data = response.json()
+        tmdbData = response.json()
+        logging.debug(pformat(tmdbData))
 
         # Print the description of the TV show
-        logging.debug("description gotten: " + data['overview'])
+        logging.debug("description gotten: " + tmdbData['overview'])
         with open(runDir + "showDesc.txt", "w") as fb:
-            fb.write(data['overview'] + "\n\n")
+            fb.write(tmdbData['overview'] + "\n\n")
         logging.info("TMDB Description dumped to showDesc.txt")
 
     logging.info("Making screenshots...")
@@ -201,14 +241,146 @@ def main():
     torrent = torf.Torrent()
     torrent.private = True
     torrent.source = "HUNO"
+    torrent.path = path
     with open("trackerURL.txt", "r") as t:
         torrent.trackers = t.readlines()
-    torrent.path = path
+    torrentFileName = "generatedTorrent.torrent"
+    if arg.tmdb:
+        # Create torrent file name from TMDB and Mediainfo
+        # Template:
+        # ShowName (Year) S00 (1080p BluRay x265 SDR DD 5.1 Language - Group)
+        # pprint(mediaInfoText)
+        showName = tmdbData['name']
+        logging.info("Name: " + str(showName))
+        dateString = tmdbData['first_air_date']
+        date = datetime.strptime(dateString, "%Y-%m-%d")
+        year = str(date.year)
+        logging.info("Year: " + year)
+        logging.debug(videoFile)
+        season = get_season(videoFile)
+        logging.info("Season: " + season)
+        # Detect resolution
+        # TODO: Detect whether it's progressive or interlaced
+        resolution = mediaInfoText['media']['track'][1]['Height'] + "p"
+        logging.info("Resolution: " + resolution)
+        # Detect if file is HDR
+        HDR = False
+        DV = False
+        SDR = False
+        if 'HDR' in mediaInfoText['media']['track'][1]['ColorSpace']:
+            HDR = True
+        if 'DV' in mediaInfoText['media']['track'][1]['ColorSpace']:
+            DV = True
+        if not HDR and not DV:
+            SDR = True
+        if SDR:
+            colourSpace = 'SDR'
+        else:
+            colourSpace = mediaInfoText['media']['track'][1]['ColorSpace']
+        logging.info("Colour Space: " + colourSpace)
+        # Detect video codec
+        if 'HEVC' in mediaInfoText['media']['track'][1]['Format']:
+            videoCodec = "x265"
+        else:
+            videoCodec = "x264"
+        logging.info("Video Codec: " + videoCodec)
+        # TODO: Detect audio codec
+        if arg.audio:
+            audio = arg.audio
+        else:
+            audio = ""
+        logging.info("Audio: " + audio)
+        # Get language
+        language = get_language_name(mediaInfoText['media']['track'][2]['Language'])
+        logging.info("Language: " + language)
+        # Get source
+        if arg.source:
+            source = arg.source
+        else:
+            source = ""
+        logging.info("Source: " + source)
+        # Get group
+        if arg.group:
+            group = arg.group
+        else:
+            group = ""
+        logging.info("Group: " + group)
+        # Construct torrent name
+        torrentFileName = f"{showName} ({year}) {season} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}).torrent"
+        logging.info("Final name: " + torrentFileName)
+
     logging.info("Generating torrent file hash. This will take a long while...")
     success = torrent.generate(callback=cb, interval=1)
     logging.info("Writing torrent file to disk...")
-    torrent.write(runDir + "generatedTorrent.torrent")
-    logging.info("Torrent file wrote to generatedTorrent.torrent")
+    torrent.write(runDir + torrentFileName)
+    logging.info("Torrent file wrote to " + torrentFileName)
+
+    if arg.inject:
+        logging.info("Qbittorrent injection enabled")
+        with open("qbitDetails.txt", "r") as d:
+            lines = d.readlines()
+            username = lines[0].strip()
+            password = lines[1].strip()
+        logging.info("Username: " + username)
+        logging.info("Password: " + password)
+        qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=username, password=password)
+        logging.info("Logging in to qbit...")
+        # try:
+        #     qb.auth_log_in()
+        # except qbittorrentapi.LoginFailed as e:
+        #     print(e)
+        #     sys.exit()
+        # except Exception as e:
+        #     print(e)
+        #     sys.exit()
+        logging.info("Logged in to qbit")
+        # with open(runDir + "generatedTorrent.torrent", 'rb') as torrent_file:
+        torrent_file = runDir + torrentFileName
+        torrent_file = rf"{torrent_file}"
+        logging.info(f"Injecting {torrent_file} to qbit...")
+        try:
+            result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=True, category="HUNO", tags="Self-Upload")
+        except Exception as e:
+            print(e)
+        if result == "Ok.":
+            logging.info("Torrent successfully injected.")
+        else:
+            logging.critical(result)
+
+
+def delete_if_no_torrent(dirpath):
+    # Runs through contents of a directory, and deletes directory if there's no .torrent files.
+    # Returns true if directory was deleted, false otherwise
+    # Use os.listdir() to get the list of files in the directory
+    files = os.listdir(dirpath)
+    # Check if there are any .torrent files in the list
+    if not any(f.endswith('.torrent') for f in files):
+        # If no .torrent files are found, delete the directory
+        shutil.rmtree(dirpath)
+        return True
+    return False
+
+
+def get_season(filename):
+    # Use a regex to match the season string
+    match = re.search(r'S\d\d', filename)
+    if match:
+        # If a match is found, return the season string
+        return match.group(0)
+    else:
+        # If no match is found, return an empty string
+        return ''
+
+
+def get_language_name(language_code):
+    try:
+        # Create a Locale instance with the given language code
+        locale = Locale(language_code)
+        # Return the language name in the locale's native language
+        return locale.get_language_name(locale.language)
+    except Exception:
+        # If the language code is invalid or the name cannot be determined, return an empty string
+        return ''
 
 
 def folders_in(path_to_parent):
@@ -263,6 +435,9 @@ def getInfoDump(filePath: str, runDir: str):
         # Write the modified lines to the file
         for line in new_lines:
             fo.write(line)
+    # Create a new mediainfo dump in JSON for parsing later
+    output = MediaInfo.parse(filename=filePath, output="JSON", full=False)
+    return output
 
 
 if __name__ == "__main__":

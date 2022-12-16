@@ -128,12 +128,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-mediainfo.txt
 Mediainfo
 .vscode
-tmdbApi.txt
-showDesc.txt
 screenshots
-imgbbApi.txt
-trackerURL.txt
+*.txt
 *.torrent
+runs

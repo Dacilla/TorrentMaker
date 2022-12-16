@@ -7,3 +7,5 @@ Script to automate creation of torrent files, as well as grabbing mediainfo dump
  - requests
  - opencv-python
  - torf
+ - qbittorrent-api
+ - babel
