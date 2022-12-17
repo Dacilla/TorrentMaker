@@ -69,11 +69,30 @@ def main():
         help="Enable to upload generated screenshots to imgbb automatically"
     )
     parser.add_argument(
+        "-m",
+        "--movie",
+        action="store_true",
+        default=False,
+        help="Enable if input is a movie"
+    )
+    parser.add_argument(
+        "--huno",
+        action="store_true",
+        default=False,
+        help="Enable to upload torrent to HUNO, using api key found in hunoAPI.txt"
+    )
+    parser.add_argument(
         "-i",
         "--inject",
         action="store_true",
         default=False,
         help="Enable to automatically inject torrent file to qbittorrent"
+    )
+    parser.add_argument(
+        "--skipPrompt",
+        action="store_true",
+        default=False,
+        help="Enable to skip being asked if you want to upload to HUNO"
     )
     parser.add_argument(
         "-D", "--debug", action="store_true", help="debug mode", default=False
@@ -121,13 +140,13 @@ def main():
         mediaInfoText = getInfoDump(path, runDir)
     elif result == 2:
         # List all files in the folder
-        files = os.listdir(path)
+        data = os.listdir(path)
 
         # Sort the files alphabetically
-        files.sort()
+        data.sort()
 
         # Look for the first video file
-        for file in files:
+        for file in data:
             # Check the file extension
             name, ext = os.path.splitext(file)
             if ext in ['.mp4', '.avi', '.mkv']:
@@ -152,7 +171,10 @@ def main():
         tv_show_id = arg.tmdb
 
         # Build the URL for the API request
-        url = f'https://api.themoviedb.org/3/tv/{tv_show_id}?api_key={api_key}'
+        if arg.movie:
+            url = f'https://api.themoviedb.org/3/movie/{tv_show_id}?api_key={api_key}'
+        else:
+            url = f'https://api.themoviedb.org/3/tv/{tv_show_id}?api_key={api_key}'
 
         # Make the GET request to the TMDb API
         response = requests.get(url)
@@ -160,7 +182,6 @@ def main():
         # Get the JSON data from the response
         tmdbData = response.json()
         logging.debug(pformat(tmdbData))
-
         # Print the description of the TV show
         logging.debug("description gotten: " + tmdbData['overview'])
         with open(runDir + "showDesc.txt", "w") as fb:
@@ -171,8 +192,8 @@ def main():
     if not os.path.isdir(runDir + "screenshots"):
         os.mkdir(runDir + "screenshots")
     else:
-        files = os.listdir(runDir + "screenshots")
-        for i in files:
+        data = os.listdir(runDir + "screenshots")
+        for i in data:
             os.remove(runDir + "screenshots" + os.sep + i)
 
     video = cv2.VideoCapture(videoFile)
@@ -250,9 +271,15 @@ def main():
         # Template:
         # ShowName (Year) S00 (1080p BluRay x265 SDR DD 5.1 Language - Group)
         # pprint(mediaInfoText)
-        showName = tmdbData['name']
+        if arg.movie:
+            showName = tmdbData['original_title']
+        else:
+            showName = tmdbData['name']
         logging.info("Name: " + str(showName))
-        dateString = tmdbData['first_air_date']
+        if arg.movie:
+            dateString = tmdbData['release_date']
+        else:
+            dateString = tmdbData['first_air_date']
         date = datetime.strptime(dateString, "%Y-%m-%d")
         year = str(date.year)
         logging.info("Year: " + year)
@@ -306,7 +333,10 @@ def main():
             group = ""
         logging.info("Group: " + group)
         # Construct torrent name
-        torrentFileName = f"{showName} ({year}) {season} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}).torrent"
+        if arg.movie:
+            torrentFileName = f"{showName} ({year}) ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}).torrent"
+        else:
+            torrentFileName = f"{showName} ({year}) {season} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}).torrent"
         logging.info("Final name: " + torrentFileName)
 
     logging.info("Generating torrent file hash. This will take a long while...")
@@ -314,6 +344,105 @@ def main():
     logging.info("Writing torrent file to disk...")
     torrent.write(runDir + torrentFileName)
     logging.info("Torrent file wrote to " + torrentFileName)
+
+    if arg.huno:
+        logging.info("Uploading to HUNO enabled")
+        pathresult = FileOrFolder(path)
+        if pathresult == 1 or arg.movie:
+            season_pack = 0
+        else:
+            season_pack = 1
+
+        if arg.movie:
+            category = 1
+        else:
+            category = 2
+
+        if videoCodec == "x265":
+            type_id = 15
+        else:
+            type_id = 3
+
+        match resolution:
+            case "2160p":
+                resolution_id = 2
+            case "1080p":
+                resolution_id = 3
+            case "1080i":
+                resolution_id = 4
+            case "720p":
+                resolution_id = 5
+            case "576p":
+                resolution_id = 6
+            case "480p":
+                resolution_id = 8
+
+        # Get IMDB ID from TVDB API
+        if arg.movie:
+            IMDB_ID = tmdbData["imdb_id"]
+            TVDB_ID = 0
+        else:
+            url = f'https://api.themoviedb.org/3/tv/{tv_show_id}/external_ids?api_key={api_key}'
+            # Make the GET request to the TMDb API
+            response = requests.get(url)
+
+            # Get the JSON data from the response
+            tmdbtoIMDDdata = response.json()
+            IMDB_ID = tmdbtoIMDDdata['imdb_id']
+            TVDB_ID = tmdbtoIMDDdata['tvdb_id']
+            IMDB_ID = int(re.findall(r'\d+', IMDB_ID)[0])
+        # Get description
+        with open(runDir + "showDesc.txt", "r") as descFile:
+            description = descFile.read()
+
+        # Get MediaInfo Dump
+        with open(runDir + "mediainfo.txt", "r") as infoFile:
+            mediaInfoDump = infoFile.read()
+
+        # Get post name
+        postName = torrentFileName.replace(".torrent", "")
+        torrent_file = runDir + torrentFileName
+        torrent_file = {'torrent': open(torrent_file, 'rb')}
+        # headers = {
+        #     'Content-Type': 'multipart/form-data',
+        #     'Accept': 'application/json',
+        # }
+        data = {
+            'season_pack': season_pack,
+            'stream': 1,
+            'anonymous': 0,
+            'internal': 0,
+            'category_id': category,
+            'type_id': type_id,
+            'resolution_id': resolution_id,
+            'tmdb': arg.tmdb,
+            'imdb': IMDB_ID,
+            'tvdb': TVDB_ID,
+            'description': f'''{description}''',
+            'mediainfo': f'''{mediaInfoDump}''',
+            'name': postName,
+        }
+
+        # Get the season number
+        if not arg.movie:
+            seasonNum = int(re.findall(r'\d+', season)[0])
+            data["season"] = seasonNum
+            data["episode"] = 0
+        # pprint(headers)
+        pprint(data)
+        print("-------------------------")
+        # print(headers)
+        print(data)
+        if arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
+            # Make API requests
+            with open("hunoAPI.txt", "r") as hAPI:
+                hunoAPI = hAPI.read()
+            logging.info("HUNO API KEY: " + hunoAPI)
+            url = f"https://hawke.uno/api/torrents/upload?api_token={hunoAPI}"
+            logging.info("API URL: " + url)
+            response = requests.post(url=url, data=data, files=torrent_file)
+            print(response.status_code)
+            print(response.json())
 
     if arg.inject:
         logging.info("Qbittorrent injection enabled")
@@ -323,8 +452,8 @@ def main():
             password = lines[1].strip()
         logging.info("Username: " + username)
         logging.info("Password: " + password)
-        qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=username, password=password)
         logging.info("Logging in to qbit...")
+        qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=username, password=password)
         # try:
         #     qb.auth_log_in()
         # except qbittorrentapi.LoginFailed as e:
@@ -338,14 +467,30 @@ def main():
         torrent_file = runDir + torrentFileName
         torrent_file = rf"{torrent_file}"
         logging.info(f"Injecting {torrent_file} to qbit...")
+        if arg.huno:
+            paused = False
+        else:
+            paused = True
         try:
-            result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=True, category="HUNO", tags="Self-Upload")
+            result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category="HUNO", tags="Self-Upload")
         except Exception as e:
             print(e)
         if result == "Ok.":
             logging.info("Torrent successfully injected.")
         else:
             logging.critical(result)
+
+
+def getUserInput(question: str):
+    question = question + " [y, n]"
+    Userinput = None
+    while Userinput not in ["y", "yes", "n", "no"]:
+        Userinput = input(question)
+        if Userinput in ["y", "yes"]:
+            return True
+        if Userinput in ["n", "no"]:
+            return False
+        logging.warning("Given input is not valid. Must be one of [y,n]\n")
 
 
 def delete_if_no_torrent(dirpath):
