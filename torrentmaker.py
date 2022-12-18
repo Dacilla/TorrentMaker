@@ -9,6 +9,7 @@ import qbittorrentapi
 import json
 import re
 import shutil
+import random
 
 from babel import Locale
 from pprint import pprint, pformat
@@ -62,6 +63,14 @@ def main():
         default=None
     )
     parser.add_argument(
+        "-e",
+        "--edition",
+        action="store",
+        type=str,
+        help="Set an Edition tag",
+        default=None
+    )
+    parser.add_argument(
         "-u",
         "--upload",
         action="store_true",
@@ -80,6 +89,12 @@ def main():
         action="store_true",
         default=False,
         help="Enable to upload torrent to HUNO, using api key found in hunoAPI.txt"
+    )
+    parser.add_argument(
+        "--throttle",
+        action="store_true",
+        default=False,
+        help="Enable to throttle qbit upload speed if it's not already throttled while uploading screenshots"
     )
     parser.add_argument(
         "-i",
@@ -137,6 +152,7 @@ def main():
     logging.info(f"Creating mediainfo dump in {runDir + DUMPFILE}...")
     if result == 1:
         videoFile = path
+        file = os.path.basename(path)
         mediaInfoText = getInfoDump(path, runDir)
     elif result == 2:
         # List all files in the folder
@@ -216,8 +232,32 @@ def main():
             # Save the image to a file
             cv2.imwrite(runDir + f"screenshots{os.sep}" + "screenshot_{}.png".format(timestamp), image)
             logging.info(f"Screenshot made at {runDir}screenshots{os.sep}" + "screenshot_{}.png".format(timestamp))
-
+    video.release()
     if arg.upload:
+        if arg.throttle and arg.upload:
+            logging.info("Attempting to enable qbit upload speed limit")
+            with open("qbitDetails.txt", "r") as d:
+                lines = d.readlines()
+                username = lines[0].strip()
+                password = lines[1].strip()
+            logging.debug("Username: " + username)
+            logging.debug("Password: " + password)
+            logging.info("Logging in to qbit...")
+            qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=username, password=password)
+            transfer_info = qb.transfer_info()
+            uniqueUploadLimit = random.randint(900000, 1000000)
+            if qb.transfer_upload_limit() == 0:
+                qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
+                uploadLimitEnabled = True
+                logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
+            if 900000 <= qb.transfer_upload_limit() <= 1000000:
+                logging.info("Another instance of this script has already changed the upload limit. Overwriting...")
+                qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
+                uploadLimitEnabled = True
+                logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
+            else:
+                logging.info("Qbit upload limit already exists. Continuing...")
+                uploadLimitEnabled = False
         logging.info("Uploading screenshots to imgbb")
         if not os.path.isfile("imgbbApi.txt"):
             logging.error("No imgbbApi.txt file found")
@@ -231,8 +271,8 @@ def main():
             logging.info(f"Uploading {image}")
             # Open the file and read the data
             filePath = runDir + "screenshots" + os.sep + image
-            with open(filePath, "rb") as file:
-                file_data = file.read()
+            with open(filePath, "rb") as imagefile:
+                file_data = imagefile.read()
             # Set the payload for the POST request
             payload = {
                 "key": imgbbAPI,
@@ -257,6 +297,24 @@ def main():
             except Exception as e:
                 logging.critical("Unexpected Exception: " + e)
                 continue
+        if arg.upload:
+            logging.info("Attempting to disable qbit upload speed limit")
+            with open("qbitDetails.txt", "r") as d:
+                lines = d.readlines()
+                username = lines[0].strip()
+                password = lines[1].strip()
+            logging.debug("Username: " + username)
+            logging.debug("Password: " + password)
+            logging.info("Logging in to qbit...")
+            qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=username, password=password)
+            transfer_info = qb.transfer_info()
+            if qb.transfer_upload_limit() == uniqueUploadLimit:
+                qb.transfer_set_upload_limit(limit=0)
+                uploadLimitEnabled = False
+                logging.info("Qbit upload limit successfully disabled.")
+            else:
+                logging.info("Qbit upload limit has already been changed. Continuing...")
+                uploadLimitEnabled = True
 
     logging.info("Creating torrent file")
     torrent = torf.Torrent()
@@ -272,9 +330,10 @@ def main():
         # ShowName (Year) S00 (1080p BluRay x265 SDR DD 5.1 Language - Group)
         # pprint(mediaInfoText)
         if arg.movie:
-            showName = tmdbData['original_title']
+            showName: str = tmdbData['original_title']
         else:
-            showName = tmdbData['name']
+            showName: str = tmdbData['name']
+        showName = showName.replace(":", " -")
         logging.info("Name: " + str(showName))
         if arg.movie:
             dateString = tmdbData['release_date']
@@ -283,12 +342,19 @@ def main():
         date = datetime.strptime(dateString, "%Y-%m-%d")
         year = str(date.year)
         logging.info("Year: " + year)
-        logging.debug(videoFile)
-        season = get_season(videoFile)
+        logging.debug(file)
+        season = get_season(file)
         logging.info("Season: " + season)
         # Detect resolution
         # TODO: Detect whether it's progressive or interlaced
-        resolution = mediaInfoText['media']['track'][1]['Height'] + "p"
+        acceptedResolutions = "2160p|1080p|720p"
+        match = re.search(acceptedResolutions, file)
+        if match:
+            resolution = match.group()
+        else:
+            width = mediaInfoText['media']['track'][1]['Width']
+            height = mediaInfoText['media']['track'][1]['Height']
+            resolution = getResolution(width=width, height=height)
         logging.info("Resolution: " + resolution)
         # Detect if file is HDR
         HDR = False
@@ -332,11 +398,21 @@ def main():
         else:
             group = ""
         logging.info("Group: " + group)
+        # Get Edition
+        if arg.edition:
+            edition = " " + arg.edition
+        else:
+            edition = ""
+        # Get if repack
+        if "REPACK" in file:
+            repack = " [REPACK]"
+        else:
+            repack = ""
         # Construct torrent name
         if arg.movie:
-            torrentFileName = f"{showName} ({year}) ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}).torrent"
+            torrentFileName = f"{showName} ({year}){edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         else:
-            torrentFileName = f"{showName} ({year}) {season} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}).torrent"
+            torrentFileName = f"{showName} ({year}) {season} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         logging.info("Final name: " + torrentFileName)
 
     logging.info("Generating torrent file hash. This will take a long while...")
@@ -390,8 +466,8 @@ def main():
             tmdbtoIMDDdata = response.json()
             IMDB_ID = tmdbtoIMDDdata['imdb_id']
             TVDB_ID = tmdbtoIMDDdata['tvdb_id']
-            IMDB_ID = int(re.findall(r'\d+', IMDB_ID)[0])
         # Get description
+        IMDB_ID = int(re.findall(r'\d+', IMDB_ID)[0])
         with open(runDir + "showDesc.txt", "r") as descFile:
             description = descFile.read()
 
@@ -472,13 +548,26 @@ def main():
         else:
             paused = True
         try:
-            result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category="HUNO", tags="Self-Upload")
+            result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category="HUNO", tags="Self-Upload", rename=postName)
         except Exception as e:
             print(e)
         if result == "Ok.":
             logging.info("Torrent successfully injected.")
         else:
             logging.critical(result)
+
+
+def getResolution(width, height):
+    width_to_height_dict = {"720": "576", "960": "540", "1280": "720", "1920": "1080", "4096": "2160", "3840": "2160", "692": "480", "1024": "576"}
+
+    if width in width_to_height_dict:
+        height = width_to_height_dict[width]
+        return f"{str(height)}p"
+
+    if height is not None:
+        return f"{str(height)}p"
+
+    print("Resolution could not be found. Please input the resolution manually (e.g. 1080p, 2160p, 720p)\n")
 
 
 def getUserInput(question: str):
