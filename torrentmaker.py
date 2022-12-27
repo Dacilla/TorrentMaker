@@ -24,6 +24,16 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 DUMPFILE = "mediainfo.txt"
 APIKEYFILE = "tmdbApi.txt"
 
+# TODO: Add audio codec and channel detection
+# TODO: Add HDR detection
+# TODO: Add detection of bluray extras
+# TODO: Consolidate all settings files to a single auto generated config
+# TODO: Fix throttling of qbit upload speed to work with multiple instances of script
+# TODO: Add ability to change download location when injecting to qbit in the case it's not in the default directory
+# TODO: Add detection of interlaced video
+# TODO: Download Mediainfo if it's not found
+# TODO: Add support for more trackers
+# TODO: Figure out qbit not following the throttle exactly
 
 def main():
     parser = argparse.ArgumentParser(
@@ -68,6 +78,13 @@ def main():
         action="store",
         type=str,
         help="Set an Edition tag",
+        default=None
+    )
+    parser.add_argument(
+        "--hdr",
+        action="store",
+        type=str,
+        help="Set an HDR tag. Will be replaced by automatic detection",
         default=None
     )
     parser.add_argument(
@@ -308,6 +325,8 @@ def main():
             logging.info("Logging in to qbit...")
             qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=username, password=password)
             transfer_info = qb.transfer_info()
+            logging.info("Qbit upload limit: " + str(qb.transfer_upload_limit()))
+            logging.info("Comparing to: " + str(uniqueUploadLimit))
             if qb.transfer_upload_limit() == uniqueUploadLimit:
                 qb.transfer_set_upload_limit(limit=0)
                 uploadLimitEnabled = False
@@ -327,7 +346,8 @@ def main():
     if arg.tmdb:
         # Create torrent file name from TMDB and Mediainfo
         # Template:
-        # ShowName (Year) S00 (1080p BluRay x265 SDR DD 5.1 Language - Group)
+        # TV: ShowName (Year) S00 (1080p BluRay x265 SDR DD 5.1 Language - Group) [REPACK]
+        # MOVIE: ShowName (Year) EDITION (1080p BluRay x265 SDR DD 5.1 Language - Group) [REPACK]
         # pprint(mediaInfoText)
         if arg.movie:
             showName: str = tmdbData['original_title']
@@ -343,8 +363,9 @@ def main():
         year = str(date.year)
         logging.info("Year: " + year)
         logging.debug(file)
-        season = get_season(file)
-        logging.info("Season: " + season)
+        if not arg.movie:
+            season = get_season(file)
+            logging.info("Season: " + season)
         # Detect resolution
         # TODO: Detect whether it's progressive or interlaced
         acceptedResolutions = "2160p|1080p|720p"
@@ -357,25 +378,32 @@ def main():
             resolution = getResolution(width=width, height=height)
         logging.info("Resolution: " + resolution)
         # Detect if file is HDR
-        HDR = False
-        DV = False
-        SDR = False
-        if 'HDR' in mediaInfoText['media']['track'][1]['ColorSpace']:
-            HDR = True
-        if 'DV' in mediaInfoText['media']['track'][1]['ColorSpace']:
-            DV = True
-        if not HDR and not DV:
-            SDR = True
-        if SDR:
-            colourSpace = 'SDR'
+        if arg.hdr:
+            colourSpace = arg.hdr
         else:
-            colourSpace = mediaInfoText['media']['track'][1]['ColorSpace']
+            colourSpace = 'SDR'
+        # HDR = False
+        # DV = False
+        # SDR = False
+        # if 'HDR' in mediaInfoText['media']['track'][1]['ColorSpace']:
+        #     HDR = True
+        # if 'DV' in mediaInfoText['media']['track'][1]['ColorSpace']:
+        #     DV = True
+        # if not HDR and not DV:
+        #     SDR = True
+        # if SDR:
+        #     colourSpace = 'SDR'
+        # else:
+        #     colourSpace = mediaInfoText['media']['track'][1]['ColorSpace']
         logging.info("Colour Space: " + colourSpace)
         # Detect video codec
         if 'HEVC' in mediaInfoText['media']['track'][1]['Format']:
-            videoCodec = "x265"
+            if 'h265' in file.lower():
+                videoCodec = 'H265'
+            else:
+                videoCodec = "x265"
         else:
-            videoCodec = "x264"
+            videoCodec = "H264"
         logging.info("Video Codec: " + videoCodec)
         # TODO: Detect audio codec
         if arg.audio:
@@ -396,7 +424,7 @@ def main():
         if arg.group:
             group = arg.group
         else:
-            group = ""
+            group = "NOGRP"
         logging.info("Group: " + group)
         # Get Edition
         if arg.edition:
@@ -567,7 +595,7 @@ def getResolution(width, height):
     if height is not None:
         return f"{str(height)}p"
 
-    print("Resolution could not be found. Please input the resolution manually (e.g. 1080p, 2160p, 720p)\n")
+    return input("Resolution could not be found. Please input the resolution manually (e.g. 1080p, 2160p, 720p)\n")
 
 
 def getUserInput(question: str):
