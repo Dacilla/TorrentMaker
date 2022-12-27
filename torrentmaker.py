@@ -34,6 +34,7 @@ APIKEYFILE = "tmdbApi.txt"
 # TODO: Download Mediainfo if it's not found
 # TODO: Add support for more trackers
 # TODO: Figure out qbit not following the throttle exactly
+# TODO: Add documentation to readme
 
 def main():
     parser = argparse.ArgumentParser(
