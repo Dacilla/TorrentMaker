@@ -10,6 +10,7 @@ import json
 import re
 import shutil
 import random
+import zipfile
 
 from babel import Locale
 from pprint import pprint, pformat
@@ -23,18 +24,22 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 DUMPFILE = "mediainfo.txt"
 APIKEYFILE = "tmdbApi.txt"
+SEEDING_DIR = f"S:{os.sep}Auto Downloads"
 
 # TODO: Add audio codec and channel detection
 # TODO: Add HDR detection
 # TODO: Add detection of bluray extras
 # TODO: Consolidate all settings files to a single auto generated config
 # TODO: Fix throttling of qbit upload speed to work with multiple instances of script
-# TODO: Add ability to change download location when injecting to qbit in the case it's not in the default directory
 # TODO: Add detection of interlaced video
 # TODO: Download Mediainfo if it's not found
 # TODO: Add support for more trackers
 # TODO: Figure out qbit not following the throttle exactly
 # TODO: Add documentation to readme
+# TODO: Support anime with MAL ID
+
+# https://qbittorrent-api.readthedocs.io/en/latest/apidoc/torrents.html#qbittorrentapi.torrents.TorrentDictionary.rename_file
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -128,6 +133,12 @@ def main():
         help="Enable to skip being asked if you want to upload to HUNO"
     )
     parser.add_argument(
+        "--skipMICheck",
+        action="store_true",
+        default=False,
+        help="Enable to skip checking for MediaInfo CLI install"
+    )
+    parser.add_argument(
         "-D", "--debug", action="store_true", help="debug mode", default=False
     )
     parser.add_argument(
@@ -142,8 +153,26 @@ def main():
     logging.basicConfig(datefmt=LOG_DATE_FORMAT, format=LOG_FORMAT, level=level)
     logging.info(f"Version {__VERSION} starting...")
 
+    if not arg.skipMICheck:
+        if not os.path.isdir("Mediainfo"):
+            os.mkdir("Mediainfo")
+        # Iterate through all the files in the root folder and its subfolders
+        mediainfoExists = False
+        for root, dirs, files in os.walk("Mediainfo"):
+            for file in files:
+                if file.lower == "mediainfo.exe":
+                    mediainfoExists = True
+                    logging.info("Mediainfo CLI found!")
+                    break
+            if mediainfoExists:
+                break
+        if not mediainfoExists:
+            logging.info("Mediainfo CLI not found. Downloading...")
+            downloadMediainfo()
+
     path = arg.path
     result = FileOrFolder(path)
+
     if result not in [1, 2]:
         logging.error("Input not a file or directory")
         sys.exit()
@@ -268,7 +297,7 @@ def main():
                 qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
                 uploadLimitEnabled = True
                 logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
-            if 900000 <= qb.transfer_upload_limit() <= 1000000:
+            elif 900000 <= qb.transfer_upload_limit() <= 1000000:
                 logging.info("Another instance of this script has already changed the upload limit. Overwriting...")
                 qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
                 uploadLimitEnabled = True
@@ -335,6 +364,7 @@ def main():
             else:
                 logging.info("Qbit upload limit has already been changed. Continuing...")
                 uploadLimitEnabled = True
+
 
     logging.info("Creating torrent file")
     torrent = torf.Torrent()
@@ -444,6 +474,17 @@ def main():
             torrentFileName = f"{showName} ({year}) {season} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         logging.info("Final name: " + torrentFileName)
 
+        if arg.huno and arg.inject:
+            head, tail = os.path.split(path)
+            headBasename = os.path.basename(head)
+            postName = torrentFileName.replace(".torrent", "")
+            if head != SEEDING_DIR:
+                logging.info("Attempting to create hardlinks for easy seeding...")
+                destination = os.path.join(SEEDING_DIR, postName)
+                copy_folder_structure(path, destination)
+                logging.info("Hardlinks created at " + destination)
+                torrent.path = destination
+
     logging.info("Generating torrent file hash. This will take a long while...")
     success = torrent.generate(callback=cb, interval=1)
     logging.info("Writing torrent file to disk...")
@@ -551,6 +592,7 @@ def main():
 
     if arg.inject:
         logging.info("Qbittorrent injection enabled")
+
         with open("qbitDetails.txt", "r") as d:
             lines = d.readlines()
             username = lines[0].strip()
@@ -586,6 +628,29 @@ def main():
             logging.critical(result)
 
 
+def downloadMediainfo():
+    # Set the URL for the mediainfo download
+    url = "https://mediaarea.net/download/binary/mediainfo/22.12/MediaInfo_CLI_22.12_Windows_x64.zip"
+
+    # Set the destination folder
+    destination_folder = "Mediainfo"
+
+    # Create the destination folder if it doesn't already exist
+    if not os.path.exists(destination_folder):
+        os.makedirs(destination_folder)
+
+    # Download the file
+    response = requests.get(url)
+    open("MediaInfo_CLI_22.12_Windows_x64.zip", "wb").write(response.content)
+    logging.info("MediaInfo_CLI_22.12_Windows_x64.zip downloaded. Unpacking in to ./Mediainfo/")
+    # Unpack the zip file
+    with zipfile.ZipFile("MediaInfo_CLI_22.12_Windows_x64.zip", "r") as zip_ref:
+        zip_ref.extractall(destination_folder)
+
+    # Delete the zip file
+    os.remove("MediaInfo_CLI_22.12_Windows_x64.zip")
+
+
 def getResolution(width, height):
     width_to_height_dict = {"720": "576", "960": "540", "1280": "720", "1920": "1080", "4096": "2160", "3840": "2160", "692": "480", "1024": "576"}
 
@@ -597,6 +662,24 @@ def getResolution(width, height):
         return f"{str(height)}p"
 
     return input("Resolution could not be found. Please input the resolution manually (e.g. 1080p, 2160p, 720p)\n")
+
+
+def copy_folder_structure(src_path, dst_path):
+  # Create the destination folder if it doesn't exist
+  if not os.path.exists(dst_path):
+    os.makedirs(dst_path)
+
+  # Iterate over all the files and folders in the source path
+  for item in os.listdir(src_path):
+    src_item_path = os.path.join(src_path, item)
+    dst_item_path = os.path.join(dst_path, item)
+
+    # If the item is a file, hardlink it to the destination
+    if os.path.isfile(src_item_path):
+      os.link(src_item_path, dst_item_path)
+    # If the item is a folder, recursively copy its contents
+    elif os.path.isdir(src_item_path):
+      copy_folder_structure(src_item_path, dst_item_path)
 
 
 def getUserInput(question: str):
