@@ -134,3 +134,4 @@ screenshots
 *.txt
 *.torrent
 runs
+settings.ini

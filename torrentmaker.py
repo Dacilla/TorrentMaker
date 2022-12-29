@@ -11,6 +11,7 @@ import re
 import shutil
 import random
 import zipfile
+import configparser
 
 from babel import Locale
 from pprint import pprint, pformat
@@ -23,13 +24,12 @@ LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-1
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 DUMPFILE = "mediainfo.txt"
-APIKEYFILE = "tmdbApi.txt"
+# APIKEYFILE = "tmdbApi.txt"
 SEEDING_DIR = f"S:{os.sep}Auto Downloads"
 
 # TODO: Add audio codec and channel detection
 # TODO: Add HDR detection
 # TODO: Add detection of bluray extras
-# TODO: Consolidate all settings files to a single auto generated config
 # TODO: Fix throttling of qbit upload speed to work with multiple instances of script
 # TODO: Add detection of interlaced video
 # TODO: Download Mediainfo if it's not found
@@ -153,6 +153,34 @@ def main():
     logging.basicConfig(datefmt=LOG_DATE_FORMAT, format=LOG_FORMAT, level=level)
     logging.info(f"Version {__VERSION} starting...")
 
+    if not os.path.exists('settings.ini'):
+        logging.info("No settings.ini file found. Generating...")
+        config = configparser.ConfigParser()
+
+        config['DEFAULT'] = {
+            'HUNO_API': '',
+            'TMDB_API': '',
+            'IMGBB_API': '',
+            'QBIT_USERNAME': '',
+            'QBIT_PASSWORD': '',
+            'HUNO_URL': ''
+        }
+
+        with open('settings.ini', 'w') as configfile:
+            config.write(configfile)
+        
+        sys.exit("settings.ini file generated. Please fill out before running again")
+
+    # Load the INI file
+    config = configparser.ConfigParser()
+    config.read('settings.ini')
+    huno_api = config['DEFAULT']['HUNO_API']
+    tmdb_api = config['DEFAULT']['TMDB_API']
+    imgbb_api = config['DEFAULT']['IMGBB_API']
+    qbit_username = config['DEFAULT']['QBIT_USERNAME']
+    qbit_password = config['DEFAULT']['QBIT_PASSWORD']
+    huno_url = config['DEFAULT']['HUNO_URL']
+
     if not arg.skipMICheck:
         if not os.path.isdir("Mediainfo"):
             os.mkdir("Mediainfo")
@@ -222,22 +250,20 @@ def main():
     mediaInfoText = mediaInfoText.strip()
     mediaInfoText = json.loads(mediaInfoText)
     if arg.tmdb:
-        if not os.path.isfile(os.getcwd() + os.sep + APIKEYFILE):
-            logging.error(f"{APIKEYFILE} does not exist")
+        if tmdb_api == "":
+            logging.error(f"TMDB_API field not filled in settings.ini")
             sys.exit()
         # Get TMDB info
         logging.info("Getting TMDB description")
-        with open(APIKEYFILE) as fa:
-            api_key = fa.read()
 
         # Replace TV_SHOW_ID with the ID of the TV show you want to get the description for
         tv_show_id = arg.tmdb
 
         # Build the URL for the API request
         if arg.movie:
-            url = f'https://api.themoviedb.org/3/movie/{tv_show_id}?api_key={api_key}'
+            url = f'https://api.themoviedb.org/3/movie/{tv_show_id}?api_key={tmdb_api}'
         else:
-            url = f'https://api.themoviedb.org/3/tv/{tv_show_id}?api_key={api_key}'
+            url = f'https://api.themoviedb.org/3/tv/{tv_show_id}?api_key={tmdb_api}'
 
         # Make the GET request to the TMDb API
         response = requests.get(url)
@@ -282,35 +308,31 @@ def main():
     video.release()
     if arg.upload:
         if arg.throttle and arg.upload:
-            logging.info("Attempting to enable qbit upload speed limit")
-            with open("qbitDetails.txt", "r") as d:
-                lines = d.readlines()
-                username = lines[0].strip()
-                password = lines[1].strip()
-            logging.debug("Username: " + username)
-            logging.debug("Password: " + password)
-            logging.info("Logging in to qbit...")
-            qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=username, password=password)
-            transfer_info = qb.transfer_info()
-            uniqueUploadLimit = random.randint(900000, 1000000)
-            if qb.transfer_upload_limit() == 0:
-                qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
-                uploadLimitEnabled = True
-                logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
-            elif 900000 <= qb.transfer_upload_limit() <= 1000000:
-                logging.info("Another instance of this script has already changed the upload limit. Overwriting...")
-                qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
-                uploadLimitEnabled = True
-                logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
-            else:
-                logging.info("Qbit upload limit already exists. Continuing...")
-                uploadLimitEnabled = False
+            if qbit_username != "" and qbit_password != "":
+                logging.info("Attempting to enable qbit upload speed limit")
+                # with open("qbitDetails.txt", "r") as d:
+                #     lines = d.readlines()
+                #     username = lines[0].strip()
+                #     password = lines[1].strip()
+                # logging.debug("Username: " + username)
+                # logging.debug("Password: " + password)
+                logging.info("Logging in to qbit...")
+                qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=qbit_username, password=qbit_password)
+                transfer_info = qb.transfer_info()
+                uniqueUploadLimit = random.randint(900000, 1000000)
+                if qb.transfer_upload_limit() == 0:
+                    qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
+                    uploadLimitEnabled = True
+                    logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
+                elif 900000 <= qb.transfer_upload_limit() <= 1000000:
+                    logging.info("Another instance of this script has already changed the upload limit. Overwriting...")
+                    qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
+                    uploadLimitEnabled = True
+                    logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
+                else:
+                    logging.info("Qbit upload limit already exists. Continuing...")
+                    uploadLimitEnabled = False
         logging.info("Uploading screenshots to imgbb")
-        if not os.path.isfile("imgbbApi.txt"):
-            logging.error("No imgbbApi.txt file found")
-            sys.exit()
-        with open("imgbbApi.txt", "r") as bb:
-            imgbbAPI = bb.read()
         api_endpoint = "https://api.imgbb.com/1/upload"
         images = os.listdir(f"{runDir}screenshots{os.sep}")
         logging.info("Screenshots loaded...")
@@ -322,7 +344,7 @@ def main():
                 file_data = imagefile.read()
             # Set the payload for the POST request
             payload = {
-                "key": imgbbAPI,
+                "key": imgbb_api,
                 "image": b64encode(file_data),
             }
             # with tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024) as t:
@@ -346,14 +368,8 @@ def main():
                 continue
         if arg.upload:
             logging.info("Attempting to disable qbit upload speed limit")
-            with open("qbitDetails.txt", "r") as d:
-                lines = d.readlines()
-                username = lines[0].strip()
-                password = lines[1].strip()
-            logging.debug("Username: " + username)
-            logging.debug("Password: " + password)
             logging.info("Logging in to qbit...")
-            qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=username, password=password)
+            qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=qbit_username, password=qbit_password)
             transfer_info = qb.transfer_info()
             logging.info("Qbit upload limit: " + str(qb.transfer_upload_limit()))
             logging.info("Comparing to: " + str(uniqueUploadLimit))
@@ -371,8 +387,7 @@ def main():
     torrent.private = True
     torrent.source = "HUNO"
     torrent.path = path
-    with open("trackerURL.txt", "r") as t:
-        torrent.trackers = t.readlines()
+    torrent.trackers = huno_url
     torrentFileName = "generatedTorrent.torrent"
     if arg.tmdb:
         # Create torrent file name from TMDB and Mediainfo
@@ -528,7 +543,7 @@ def main():
             IMDB_ID = tmdbData["imdb_id"]
             TVDB_ID = 0
         else:
-            url = f'https://api.themoviedb.org/3/tv/{tv_show_id}/external_ids?api_key={api_key}'
+            url = f'https://api.themoviedb.org/3/tv/{tv_show_id}/external_ids?api_key={tmdb_api}'
             # Make the GET request to the TMDb API
             response = requests.get(url)
 
@@ -549,10 +564,6 @@ def main():
         postName = torrentFileName.replace(".torrent", "")
         torrent_file = runDir + torrentFileName
         torrent_file = {'torrent': open(torrent_file, 'rb')}
-        # headers = {
-        #     'Content-Type': 'multipart/form-data',
-        #     'Accept': 'application/json',
-        # }
         data = {
             'season_pack': season_pack,
             'stream': 1,
@@ -576,15 +587,13 @@ def main():
             data["episode"] = 0
         # pprint(headers)
         pprint(data)
-        print("-------------------------")
+        print("\n-------------------------\n")
         # print(headers)
         print(data)
         if arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
             # Make API requests
-            with open("hunoAPI.txt", "r") as hAPI:
-                hunoAPI = hAPI.read()
-            logging.info("HUNO API KEY: " + hunoAPI)
-            url = f"https://hawke.uno/api/torrents/upload?api_token={hunoAPI}"
+            logging.info("HUNO API KEY: " + huno_api)
+            url = f"https://hawke.uno/api/torrents/upload?api_token={huno_api}"
             logging.info("API URL: " + url)
             response = requests.post(url=url, data=data, files=torrent_file)
             print(response.status_code)
@@ -592,15 +601,8 @@ def main():
 
     if arg.inject:
         logging.info("Qbittorrent injection enabled")
-
-        with open("qbitDetails.txt", "r") as d:
-            lines = d.readlines()
-            username = lines[0].strip()
-            password = lines[1].strip()
-        logging.info("Username: " + username)
-        logging.info("Password: " + password)
         logging.info("Logging in to qbit...")
-        qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=username, password=password)
+        qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=qbit_username, password=qbit_password)
         # try:
         #     qb.auth_log_in()
         # except qbittorrentapi.LoginFailed as e:
