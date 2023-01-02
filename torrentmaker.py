@@ -24,7 +24,6 @@ LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-1
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 DUMPFILE = "mediainfo.txt"
-# APIKEYFILE = "tmdbApi.txt"
 SEEDING_DIR = f"S:{os.sep}Auto Downloads"
 
 # TODO: Add audio codec and channel detection
@@ -37,6 +36,8 @@ SEEDING_DIR = f"S:{os.sep}Auto Downloads"
 # TODO: Figure out qbit not following the throttle exactly
 # TODO: Add documentation to readme
 # TODO: Support anime with MAL ID
+# TODO: Support BD Raw Discs
+# TODO: Add AV1 detection
 
 # https://qbittorrent-api.readthedocs.io/en/latest/apidoc/torrents.html#qbittorrentapi.torrents.TorrentDictionary.rename_file
 
@@ -168,7 +169,7 @@ def main():
 
         with open('settings.ini', 'w') as configfile:
             config.write(configfile)
-        
+
         sys.exit("settings.ini file generated. Please fill out before running again")
 
     # Load the INI file
@@ -251,7 +252,7 @@ def main():
     mediaInfoText = json.loads(mediaInfoText)
     if arg.tmdb:
         if tmdb_api == "":
-            logging.error(f"TMDB_API field not filled in settings.ini")
+            logging.error("TMDB_API field not filled in settings.ini")
             sys.exit()
         # Get TMDB info
         logging.info("Getting TMDB description")
@@ -310,12 +311,6 @@ def main():
         if arg.throttle and arg.upload:
             if qbit_username != "" and qbit_password != "":
                 logging.info("Attempting to enable qbit upload speed limit")
-                # with open("qbitDetails.txt", "r") as d:
-                #     lines = d.readlines()
-                #     username = lines[0].strip()
-                #     password = lines[1].strip()
-                # logging.debug("Username: " + username)
-                # logging.debug("Password: " + password)
                 logging.info("Logging in to qbit...")
                 qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=qbit_username, password=qbit_password)
                 transfer_info = qb.transfer_info()
@@ -381,7 +376,6 @@ def main():
                 logging.info("Qbit upload limit has already been changed. Continuing...")
                 uploadLimitEnabled = True
 
-
     logging.info("Creating torrent file")
     torrent = torf.Torrent()
     torrent.private = True
@@ -422,25 +416,11 @@ def main():
             width = mediaInfoText['media']['track'][1]['Width']
             height = mediaInfoText['media']['track'][1]['Height']
             resolution = getResolution(width=width, height=height)
+        if "Interlaced" in str(mediaInfoText):
+            resolution = resolution.replace("p", "i")
         logging.info("Resolution: " + resolution)
         # Detect if file is HDR
-        if arg.hdr:
-            colourSpace = arg.hdr
-        else:
-            colourSpace = 'SDR'
-        # HDR = False
-        # DV = False
-        # SDR = False
-        # if 'HDR' in mediaInfoText['media']['track'][1]['ColorSpace']:
-        #     HDR = True
-        # if 'DV' in mediaInfoText['media']['track'][1]['ColorSpace']:
-        #     DV = True
-        # if not HDR and not DV:
-        #     SDR = True
-        # if SDR:
-        #     colourSpace = 'SDR'
-        # else:
-        #     colourSpace = mediaInfoText['media']['track'][1]['ColorSpace']
+        colourSpace = get_colour_space(mediaInfoText)
         logging.info("Colour Space: " + colourSpace)
         # Detect video codec
         if 'HEVC' in mediaInfoText['media']['track'][1]['Format']:
@@ -451,11 +431,8 @@ def main():
         else:
             videoCodec = "H264"
         logging.info("Video Codec: " + videoCodec)
-        # TODO: Detect audio codec
-        if arg.audio:
-            audio = arg.audio
-        else:
-            audio = ""
+        # Detect audio codec
+        audio = get_audio_info(mediaInfoText)
         logging.info("Audio: " + audio)
         # Get language
         language = get_language_name(mediaInfoText['media']['track'][2]['Language'])
@@ -586,10 +563,10 @@ def main():
             data["season"] = seasonNum
             data["episode"] = 0
         # pprint(headers)
-        pprint(data)
-        print("\n-------------------------\n")
-        # print(headers)
         print(data)
+        print("\n-------------------------\n")
+        pprint(data)
+        # print(headers)
         if arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
             # Make API requests
             logging.info("HUNO API KEY: " + huno_api)
@@ -612,7 +589,6 @@ def main():
         #     print(e)
         #     sys.exit()
         logging.info("Logged in to qbit")
-        # with open(runDir + "generatedTorrent.torrent", 'rb') as torrent_file:
         torrent_file = runDir + torrentFileName
         torrent_file = rf"{torrent_file}"
         logging.info(f"Injecting {torrent_file} to qbit...")
@@ -628,6 +604,63 @@ def main():
             logging.info("Torrent successfully injected.")
         else:
             logging.critical(result)
+
+
+def get_colour_space(mediaInfo):
+    if "HDR" not in mediaInfo:
+        return "SDR"
+    if "Dolby Vision" in mediaInfo['media']['track'][1]['HDR_Format']:
+        if "HDR10" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
+            return "DV HDR"
+        else:
+            return "DV"
+    return "HDR"
+
+
+def get_audio_info(mediaInfo):
+    # Codec
+    codecsDict = {
+        "E-AC-3": "EAC3",
+        "MLP FBA": "TrueHD",
+        "DTS": "DTS",
+        "AAC": "AAC",
+        "PCM": "PCM",
+        "AC-3": "DD"
+    }
+    audioFormat = None
+    if 'Format_Commercial_IfAny' in str(mediaInfo):
+        if mediaInfo['media']['track'][2]['Format_Commercial_IfAny']:
+            commercialFormat = mediaInfo['media']['track'][2]['Format_Commercial_IfAny']
+            if "Dolby Digital" in commercialFormat:
+                if "Plus" in commercialFormat:
+                    audioFormat = "DDP"
+                else:
+                    audioFormat = "DD"
+            elif "TrueHD" in commercialFormat:
+                audioFormat = "TrueHD"
+            elif "DTS" in commercialFormat:
+                if "HD High Resolution" in commercialFormat:
+                    audioFormat = "DTS-HD HR"
+                elif "Master Audio" in commercialFormat:
+                    audioFormat = "DTS-HD MA"
+
+    if audioFormat is None:
+        if mediaInfo['media']['track'][2]['Format'] in codecsDict:
+            audioFormat = codecsDict[mediaInfo['media']['track'][2]['Format']]
+
+    if audioFormat is None:
+        logging.error("Audio format was not found")
+    # Channels
+    channelsNum = mediaInfo['media']['track'][2]['Channels']
+    channelsLayout = mediaInfo['media']['track'][2]['ChannelLayout']
+    if "LFE" in channelsLayout:
+        channelsNum = str(int(channelsNum) - 1)
+        channelsNum2 = ".1"
+    else:
+        channelsNum2 = ".0"
+    channelsNum = channelsNum + channelsNum2
+    audioInfo = audioFormat + " " + channelsNum
+    return audioInfo
 
 
 def downloadMediainfo():
@@ -667,21 +700,20 @@ def getResolution(width, height):
 
 
 def copy_folder_structure(src_path, dst_path):
-  # Create the destination folder if it doesn't exist
-  if not os.path.exists(dst_path):
-    os.makedirs(dst_path)
+    # Create the destination folder if it doesn't exist
+    if not os.path.exists(dst_path):
+        os.makedirs(dst_path)
 
-  # Iterate over all the files and folders in the source path
-  for item in os.listdir(src_path):
-    src_item_path = os.path.join(src_path, item)
-    dst_item_path = os.path.join(dst_path, item)
-
-    # If the item is a file, hardlink it to the destination
-    if os.path.isfile(src_item_path):
-      os.link(src_item_path, dst_item_path)
-    # If the item is a folder, recursively copy its contents
-    elif os.path.isdir(src_item_path):
-      copy_folder_structure(src_item_path, dst_item_path)
+    # Iterate over all the files and folders in the source path
+    for item in os.listdir(src_path):
+        src_item_path = os.path.join(src_path, item)
+        dst_item_path = os.path.join(dst_path, item)
+        # If the item is a file, hardlink it to the destination
+        if os.path.isfile(src_item_path):
+            os.link(src_item_path, dst_item_path)
+        # If the item is a folder, recursively copy its contents
+        elif os.path.isdir(src_item_path):
+            copy_folder_structure(src_item_path, dst_item_path)
 
 
 def getUserInput(question: str):
