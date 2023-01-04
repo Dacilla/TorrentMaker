@@ -26,18 +26,17 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 DUMPFILE = "mediainfo.txt"
 SEEDING_DIR = f"S:{os.sep}Auto Downloads"
 
-# TODO: Add audio codec and channel detection
-# TODO: Add HDR detection
 # TODO: Add detection of bluray extras
 # TODO: Fix throttling of qbit upload speed to work with multiple instances of script
-# TODO: Add detection of interlaced video
 # TODO: Download Mediainfo if it's not found
 # TODO: Add support for more trackers
-# TODO: Figure out qbit not following the throttle exactly
 # TODO: Add documentation to readme
 # TODO: Support anime with MAL ID
 # TODO: Support BD Raw Discs
 # TODO: Add AV1 detection
+# TODO: Add support for uploading images to ptpimg
+# TODO: Add support for individual episodes
+# TODO: Support music
 
 # https://qbittorrent-api.readthedocs.io/en/latest/apidoc/torrents.html#qbittorrentapi.torrents.TorrentDictionary.rename_file
 
@@ -73,25 +72,11 @@ def main():
         default=None
     )
     parser.add_argument(
-        "--audio",
-        action="store",
-        type=str,
-        help="Audio Codec. Will be replaced for auto detection soon",
-        default=None
-    )
-    parser.add_argument(
         "-e",
         "--edition",
         action="store",
         type=str,
         help="Set an Edition tag",
-        default=None
-    )
-    parser.add_argument(
-        "--hdr",
-        action="store",
-        type=str,
-        help="Set an HDR tag. Will be replaced by automatic detection",
         default=None
     )
     parser.add_argument(
@@ -132,6 +117,12 @@ def main():
         action="store_true",
         default=False,
         help="Enable to skip being asked if you want to upload to HUNO"
+    )
+    parser.add_argument(
+        "--hardlink",
+        action="store_true",
+        default=False,
+        help="Enable to hardlink files no matter if they're already in the seeding directory"
     )
     parser.add_argument(
         "--skipMICheck",
@@ -308,7 +299,7 @@ def main():
             logging.info(f"Screenshot made at {runDir}screenshots{os.sep}" + "screenshot_{}.png".format(timestamp))
     video.release()
     if arg.upload:
-        if arg.throttle and arg.upload:
+        if (arg.throttle and arg.upload) or arg.hardlink:
             if qbit_username != "" and qbit_password != "":
                 logging.info("Attempting to enable qbit upload speed limit")
                 logging.info("Logging in to qbit...")
@@ -318,11 +309,13 @@ def main():
                 if qb.transfer_upload_limit() == 0:
                     qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
                     uploadLimitEnabled = True
+                    uniqueUploadLimit = qb.transfer_upload_limit()
                     logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
                 elif 900000 <= qb.transfer_upload_limit() <= 1000000:
                     logging.info("Another instance of this script has already changed the upload limit. Overwriting...")
                     qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
                     uploadLimitEnabled = True
+                    uniqueUploadLimit = qb.transfer_upload_limit()
                     logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
                 else:
                     logging.info("Qbit upload limit already exists. Continuing...")
@@ -407,7 +400,6 @@ def main():
             season = get_season(file)
             logging.info("Season: " + season)
         # Detect resolution
-        # TODO: Detect whether it's progressive or interlaced
         acceptedResolutions = "2160p|1080p|720p"
         match = re.search(acceptedResolutions, file)
         if match:
@@ -428,6 +420,8 @@ def main():
                 videoCodec = 'H265'
             else:
                 videoCodec = "x265"
+        elif "VC-1" in mediaInfoText['media']['track'][1]['Format']:
+            videoCodec = "VC-1"
         else:
             videoCodec = "H264"
         logging.info("Video Codec: " + videoCodec)
@@ -498,6 +492,8 @@ def main():
 
         if videoCodec == "x265":
             type_id = 15
+        elif "remux" in source.lower():
+            type_id = 2
         else:
             type_id = 3
 
@@ -693,8 +689,8 @@ def getResolution(width, height):
         height = width_to_height_dict[width]
         return f"{str(height)}p"
 
-    if height is not None:
-        return f"{str(height)}p"
+    # if height is not None:
+    #     return f"{str(height)}p"
 
     return input("Resolution could not be found. Please input the resolution manually (e.g. 1080p, 2160p, 720p)\n")
 
@@ -756,8 +752,8 @@ def get_language_name(language_code):
     try:
         # Create a Locale instance with the given language code
         locale = Locale(language_code)
-        # Return the language name in the locale's native language
-        return locale.get_language_name(locale.language)
+        # Return the language name in english
+        return locale.get_display_name('en')
     except Exception:
         # If the language code is invalid or the name cannot be determined, return an empty string
         return ''
