@@ -624,7 +624,7 @@ def get_audio_info(mediaInfo):
         "AC-3": "DD"
     }
     audioFormat = None
-    if 'Format_Commercial_IfAny' in str(mediaInfo):
+    if 'Format_Commercial_IfAny' in str(mediaInfo['media']['track'][2]):
         if mediaInfo['media']['track'][2]['Format_Commercial_IfAny']:
             commercialFormat = mediaInfo['media']['track'][2]['Format_Commercial_IfAny']
             if "Dolby Digital" in commercialFormat:
@@ -684,13 +684,13 @@ def downloadMediainfo():
 
 def getResolution(width, height):
     width_to_height_dict = {"720": "576", "960": "540", "1280": "720", "1920": "1080", "4096": "2160", "3840": "2160", "692": "480", "1024": "576"}
-
+    acceptedHeights = ['576', '480', '360', '240', '720', '1080', '1440', '2160']
     if width in width_to_height_dict:
         height = width_to_height_dict[width]
         return f"{str(height)}p"
 
-    # if height is not None:
-    #     return f"{str(height)}p"
+    if height is not None and height in acceptedHeights:
+        return f"{str(height)}p"
 
     return input("Resolution could not be found. Please input the resolution manually (e.g. 1080p, 2160p, 720p)\n")
 
