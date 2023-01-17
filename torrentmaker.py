@@ -429,7 +429,10 @@ def main():
         audio = get_audio_info(mediaInfoText)
         logging.info("Audio: " + audio)
         # Get language
-        language = get_language_name(mediaInfoText['media']['track'][2]['Language'])
+        if 'Language' in mediaInfoText['media']['track'][2]:
+            language = get_language_name(mediaInfoText['media']['track'][2]['Language'])
+        else:
+            language = input("No language found in audio data. Please input language:\n")
         logging.info("Language: " + language)
         # Get source
         if arg.source:
