@@ -506,7 +506,7 @@ def main():
         # Construct torrent name
         if arg.movie:
             torrentFileName = f"{showName} ({year}){edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
-        if arg.episode:
+        elif arg.episode:
             torrentFileName = f"{showName} ({year}) {season}{episode} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         else:
             torrentFileName = f"{showName} ({year}) {season} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
