@@ -125,6 +125,12 @@ def main():
         help="Enable to hardlink files no matter if they're already in the seeding directory"
     )
     parser.add_argument(
+        "--episode",
+        action="store_true",
+        default=False,
+        help="Enable when processing an individual episode rather than a movie or season"
+    )
+    parser.add_argument(
         "--skipMICheck",
         action="store_true",
         default=False,
@@ -141,6 +147,9 @@ def main():
     level = logging.INFO
     if arg.debug:
         level = logging.DEBUG
+
+    if arg.episode and arg.movie:
+        logging.error("Movie and Episode arguments can't be enabled at the same time. Please remove one.")
 
     logging.basicConfig(datefmt=LOG_DATE_FORMAT, format=LOG_FORMAT, level=level)
     logging.info(f"Version {__VERSION} starting...")
@@ -191,9 +200,9 @@ def main():
             downloadMediainfo()
 
     path = arg.path
-    result = FileOrFolder(path)
+    isFolder = FileOrFolder(path)
 
-    if result not in [1, 2]:
+    if isFolder not in [1, 2]:
         logging.error("Input not a file or directory")
         sys.exit()
     if not os.path.isdir("runs"):
@@ -217,14 +226,13 @@ def main():
 
     logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
     logging.info(f"Creating mediainfo dump in {runDir + DUMPFILE}...")
-    if result == 1:
+    if isFolder == 1:
         videoFile = path
         file = os.path.basename(path)
         mediaInfoText = getInfoDump(path, runDir)
-    elif result == 2:
+    elif isFolder == 2:
         # List all files in the folder
         data = os.listdir(path)
-
         # Sort the files alphabetically
         data.sort()
 
@@ -352,7 +360,7 @@ def main():
                     fileAdd.write(bbcode + "\n")
                 logging.info(f"bbcode for image URL {image_url} added to showDesc.txt")
             except Exception as e:
-                logging.critical("Unexpected Exception: " + e)
+                logging.critical("Unexpected Exception: " + str(e))
                 continue
         if arg.upload:
             logging.info("Attempting to disable qbit upload speed limit")
@@ -397,8 +405,18 @@ def main():
         logging.info("Year: " + year)
         logging.debug(file)
         if not arg.movie:
+            # if isFolder == 2:
+            #     episodeNum = check_folder_for_episode(file)
+            # else:
+            #     filename = os.path.basename(file)
+            #     episodeNum = re.compile(r'S\d{2}E\d{2}').search(filename)
+            #     if match:
+            #         season = episodeNum.g
             season = get_season(file)
             logging.info("Season: " + season)
+        if arg.episode:
+            episode = "E" + get_episode(file)
+            logging.info("Episode: " + episode)
         # Detect resolution
         acceptedResolutions = "2160p|1080p|720p"
         match = re.search(acceptedResolutions, file)
@@ -416,12 +434,16 @@ def main():
         logging.info("Colour Space: " + colourSpace)
         # Detect video codec
         if 'HEVC' in mediaInfoText['media']['track'][1]['Format']:
+            if 'remux' in file.lower():
+                videoCodec = 'HEVC'
             if 'h265' in file.lower():
                 videoCodec = 'H265'
             else:
                 videoCodec = "x265"
         elif "VC-1" in mediaInfoText['media']['track'][1]['Format']:
             videoCodec = "VC-1"
+        elif 'remux' in file.lower():
+            videoCodec = "AVC"
         else:
             videoCodec = "H264"
         logging.info("Video Codec: " + videoCodec)
@@ -459,6 +481,8 @@ def main():
         # Construct torrent name
         if arg.movie:
             torrentFileName = f"{showName} ({year}){edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
+        if arg.episode:
+            torrentFileName = f"{showName} ({year}) {season}{episode} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         else:
             torrentFileName = f"{showName} ({year}) {season} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         logging.info("Final name: " + torrentFileName)
@@ -483,7 +507,7 @@ def main():
     if arg.huno:
         logging.info("Uploading to HUNO enabled")
         pathresult = FileOrFolder(path)
-        if pathresult == 1 or arg.movie:
+        if pathresult == 1 or arg.movie or arg.episode:
             season_pack = 0
         else:
             season_pack = 1
@@ -560,7 +584,10 @@ def main():
         if not arg.movie:
             seasonNum = int(re.findall(r'\d+', season)[0])
             data["season"] = seasonNum
-            data["episode"] = 0
+            if arg.episode:
+                seasonNum = int(re.findall(r'\d+', episode)[0])
+            else:
+                data["episode"] = 0
         # pprint(headers)
         print(data)
         print("\n-------------------------\n")
@@ -603,6 +630,29 @@ def main():
             logging.info("Torrent successfully injected.")
         else:
             logging.critical(result)
+
+
+def get_episode(filename):
+    import re
+    match = re.search(r'S\d{2}E\d{2}', filename)
+    if match:
+        return match.group().split('E')[1]
+    return input("Episode number can't be found. Please enter episode number in format 'E00'\n")
+
+
+def check_folder_for_episode(folder_path):
+    # list all files in folder
+    files = os.listdir(folder_path)
+    video_files = [f for f in files if f.endswith('.mp4') or f.endswith('.mkv') or f.endswith('.avi')]
+    # check if there is only one video file
+    if len(video_files) != 1:
+        return None
+    # check if the video file name has format S00E00
+    episode_pattern = re.compile(r'S\d{2}E\d{2}')
+    match = episode_pattern.search(video_files[0])
+    if match:
+        return match.group()
+    return None
 
 
 def get_colour_space(mediaInfo):
