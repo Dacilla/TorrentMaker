@@ -19,6 +19,8 @@ from base64 import b64encode
 from pymediainfo import MediaInfo
 from datetime import datetime
 
+from HUNOInfo import bannedEncoders, encoderGroups
+
 __VERSION = "1.0.0"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -465,6 +467,29 @@ def main():
         # Get group
         if arg.group:
             group = arg.group
+
+            # Check for banned group
+            if 'WEB' in videoCodec:
+                if group in bannedEncoders['WEB']:
+                    logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
+                    if arg.huno:
+                        sys.exit()
+            if 'REMUX' in videoCodec:
+                if group in bannedEncoders['REMUX']:
+                    logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
+                    if arg.huno:
+                        sys.exit()
+            if group in bannedEncoders['ENCODE']:
+                logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
+                if arg.huno:
+                    sys.exit()
+
+            # Get group tag
+            for encodeGroup, members in encoderGroups.items():
+                if group in members:
+                    group = group + ' ' + encodeGroup
+                    logging.info("Group found: " + encodeGroup)
+                    break
         else:
             group = "NOGRP"
         logging.info("Group: " + group)
