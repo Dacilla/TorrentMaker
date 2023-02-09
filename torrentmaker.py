@@ -28,17 +28,15 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 DUMPFILE = "mediainfo.txt"
 SEEDING_DIR = f"S:{os.sep}Auto Downloads"
 
+# TODO: Support anime with MAL ID (HUNO API Doesn't support MAL atm)
 # TODO: Add detection of bluray extras
-# TODO: Fix throttling of qbit upload speed to work with multiple instances of script
 # TODO: Download Mediainfo if it's not found
 # TODO: Add support for more trackers
 # TODO: Add documentation to readme
-# TODO: Support anime with MAL ID
 # TODO: Support BD Raw Discs
 # TODO: Add AV1 detection
-# TODO: Add support for uploading images to ptpimg
-# TODO: Add support for individual episodes
 # TODO: Support music
+# TODO: Add function to stop multiple instances from reading off the same drive, slowing it down for both
 
 # https://qbittorrent-api.readthedocs.io/en/latest/apidoc/torrents.html#qbittorrentapi.torrents.TorrentDictionary.rename_file
 
@@ -59,6 +57,13 @@ def main():
         help="TMDB ID for media",
         default=None
     )
+    # parser.add_argument(
+    #     "--mal",
+    #     action="store",
+    #     type=int,
+    #     help="MAL ID for anime",
+    #     default=None
+    # )
     parser.add_argument(
         "-g", "--group",
         action="store",
@@ -166,7 +171,8 @@ def main():
             'IMGBB_API': '',
             'QBIT_USERNAME': '',
             'QBIT_PASSWORD': '',
-            'HUNO_URL': ''
+            'HUNO_URL': '',
+            'PTPIMG_API': ''
         }
 
         with open('settings.ini', 'w') as configfile:
@@ -183,6 +189,9 @@ def main():
     qbit_username = config['DEFAULT']['QBIT_USERNAME']
     qbit_password = config['DEFAULT']['QBIT_PASSWORD']
     huno_url = config['DEFAULT']['HUNO_URL']
+    ptpimg_api = config['DEFAULT']['PTPIMG_API']
+    if ptpimg_api == '':
+        ptpimg_api = None
 
     if not arg.skipMICheck:
         if not os.path.isdir("Mediainfo"):
@@ -335,6 +344,7 @@ def main():
         images = os.listdir(f"{runDir}screenshots{os.sep}")
         logging.info("Screenshots loaded...")
         for image in images:
+            ptpupload = False
             logging.info(f"Uploading {image}")
             # Open the file and read the data
             filePath = runDir + "screenshots" + os.sep + image
@@ -348,16 +358,26 @@ def main():
             # with tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024) as t:
             #     wrapped_file = CallbackIOWrapper(t.update, payload)
             #     requests.put(api_endpoint, data=wrapped_file)
-            response = requests.post(api_endpoint, payload)
-            # Get the image URL from the response
-            image_url = response.json()
+            try:
+                response = requests.post(api_endpoint, payload)
+                # Get the image URL from the response
+                image_url = response.json()
+            except Exception:
+                logging.error("Failed to upload to imgbb. It's probably down.")
+                if ptpimg_api:
+                    logging.info("PTPImg API exists. Attempting to upload there...")
+                    image_url = uploadToPTPIMG(filePath, ptpimg_api)
+                    ptpupload = True
             logging.debug(image_url)
             try:
-                image_url = response.json()["data"]["url"]
-                image_url_viewer = response.json()["data"]["url_viewer"]
-                # Print the image URL
-                # Template: [url=https://ibb.co/0fbvMqH][img]https://i.ibb.co/0fbvMqH/screenshot-785-895652173913.png[/img][/url]
-                bbcode = f"[url={image_url_viewer}][img]{image_url}[/img][/url]"
+                if ptpupload:
+                    bbcode = f"[url={image_url}][img]{image_url}[/img][/url]"
+                else:
+                    image_url = response.json()["data"]["url"]
+                    image_url_viewer = response.json()["data"]["url_viewer"]
+                    # Print the image URL
+                    # Template: [url=https://ibb.co/0fbvMqH][img]https://i.ibb.co/0fbvMqH/screenshot-785-895652173913.png[/img][/url]
+                    bbcode = f"[url={image_url_viewer}][img]{image_url}[/img][/url]"
                 with open(runDir + "showDesc.txt", "a") as fileAdd:
                     fileAdd.write(bbcode + "\n")
                 logging.info(f"bbcode for image URL {image_url} added to showDesc.txt")
@@ -507,9 +527,9 @@ def main():
         if arg.movie:
             torrentFileName = f"{showName} ({year}){edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         elif arg.episode:
-            torrentFileName = f"{showName} ({year}) {season}{episode} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
+            torrentFileName = f"{showName} ({year}) {season}{episode}{edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         else:
-            torrentFileName = f"{showName} ({year}) {season} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
+            torrentFileName = f"{showName} ({year}) {season}{edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         logging.info("Final name: " + torrentFileName)
 
         if arg.huno and arg.inject:
@@ -524,7 +544,7 @@ def main():
                 torrent.path = destination
 
     logging.info("Generating torrent file hash. This will take a long while...")
-    success = torrent.generate(callback=cb, interval=1)
+    success = torrent.generate(callback=cb, interval=0.25)
     logging.info("Writing torrent file to disk...")
     torrent.write(runDir + torrentFileName)
     logging.info("Torrent file wrote to " + torrentFileName)
@@ -613,6 +633,8 @@ def main():
                 seasonNum = int(re.findall(r'\d+', episode)[0])
             else:
                 data["episode"] = 0
+        # if arg.mal:
+        #     data['mal'] = int(arg.mal)
         # pprint(headers)
         print(data)
         print("\n-------------------------\n")
@@ -657,9 +679,24 @@ def main():
             logging.critical(result)
 
 
-def get_episode(filename):
+def uploadToPTPIMG(imageFile: str, api_key):
+    # Stole this code from https://github.com/DeadNews/images-upload-cli
+    response = requests.post(
+        url="https://ptpimg.me/upload.php",
+        data={"api_key": api_key},
+        files={"file-upload[0]": open(imageFile, 'rb').read()},
+    )
+    if not response.ok:
+        raise Exception(response.json())
+
+    logging.debug(response.json())
+
+    return f"https://ptpimg.me/{response.json()[0]['code']}.{response.json()[0]['ext']}"
+
+
+def get_episode(filename: str):
     import re
-    match = re.search(r'S\d{2}E\d{2}', filename)
+    match = re.search(r'S\d{2}E\d{2}', filename.upper())
     if match:
         return match.group().split('E')[1]
     return input("Episode number can't be found. Please enter episode number in format 'E00'\n")
@@ -699,7 +736,9 @@ def get_audio_info(mediaInfo):
         "DTS": "DTS",
         "AAC": "AAC",
         "PCM": "PCM",
-        "AC-3": "DD"
+        "AC-3": "DD",
+        "FLAC": "FLAC",
+        "Opus": "OPUS"
     }
     audioFormat = None
     if 'Format_Commercial_IfAny' in str(mediaInfo['media']['track'][2]):
@@ -815,15 +854,15 @@ def delete_if_no_torrent(dirpath):
     return False
 
 
-def get_season(filename):
+def get_season(filename: str):
     # Use a regex to match the season string
-    match = re.search(r'S\d\d', filename)
+    match = re.search(r'S\d\d', filename.upper())
     if match:
         # If a match is found, return the season string
         return match.group(0)
     else:
         # If no match is found, return an empty string
-        return ''
+        return input('Season number was not found. Please input in the format S00')
 
 
 def get_language_name(language_code):
