@@ -12,6 +12,8 @@ import shutil
 import random
 import zipfile
 import configparser
+import guessit
+import ctypes
 
 from babel import Locale
 from pprint import pprint, pformat
@@ -258,6 +260,10 @@ def main():
                 logging.debug(pformat(json.loads(mediaInfoText)))
                 break
     logging.info("Mediainfo dump created")
+    guessItOutput = dict(guessit.guessit(videoFile))
+    logging.info(pformat(guessItOutput))
+    if 'release_group' in str(guessItOutput):
+        group = guessItOutput['release_group']
     mediaInfoText = mediaInfoText.strip()
     mediaInfoText = json.loads(mediaInfoText)
     if arg.tmdb:
@@ -343,8 +349,9 @@ def main():
         api_endpoint = "https://api.imgbb.com/1/upload"
         images = os.listdir(f"{runDir}screenshots{os.sep}")
         logging.info("Screenshots loaded...")
+        imgbb_brokey = False
         for image in images:
-            ptpupload = False
+            ptpupload = False    
             logging.info(f"Uploading {image}")
             # Open the file and read the data
             filePath = runDir + "screenshots" + os.sep + image
@@ -362,6 +369,8 @@ def main():
                 response = requests.post(api_endpoint, payload)
                 # Get the image URL from the response
                 image_url = response.json()
+                test_value = response.json()["data"]["url"]
+                test_value_2 = response.json()["data"]["url_viewer"]
             except Exception:
                 logging.error("Failed to upload to imgbb. It's probably down.")
                 if ptpimg_api:
@@ -456,9 +465,9 @@ def main():
         logging.info("Colour Space: " + colourSpace)
         # Detect video codec
         if 'HEVC' in mediaInfoText['media']['track'][1]['Format']:
-            if 'remux' in file.lower():
+            if 'remux' in file.lower().replace('.', ''):
                 videoCodec = 'HEVC'
-            if 'h265' in file.lower():
+            elif 'h265' in file.lower().replace('.', ''):
                 videoCodec = 'H265'
             else:
                 videoCodec = "x265"
@@ -488,30 +497,29 @@ def main():
         if arg.group:
             group = arg.group
 
-            # Check for banned group
-            if 'WEB' in videoCodec:
-                if group in bannedEncoders['WEB']:
-                    logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
-                    if arg.huno:
-                        sys.exit()
-            if 'REMUX' in videoCodec:
-                if group in bannedEncoders['REMUX']:
-                    logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
-                    if arg.huno:
-                        sys.exit()
-            if group in bannedEncoders['ENCODE']:
+        # Check for banned group
+        if 'WEB' in videoCodec:
+            if group in bannedEncoders['WEB']:
                 logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
                 if arg.huno:
                     sys.exit()
+        if 'REMUX' in videoCodec:
+            if group in bannedEncoders['REMUX']:
+                logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
+                if arg.huno:
+                    sys.exit()
+        if group in bannedEncoders['ENCODE']:
+            logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
+            if arg.huno:
+                sys.exit()
 
-            # Get group tag
-            for encodeGroup, members in encoderGroups.items():
-                if group in members:
-                    group = group + ' ' + encodeGroup
-                    logging.info("Group found: " + encodeGroup)
-                    break
-        else:
-            group = "NOGRP"
+        # Get group tag
+        for encodeGroup, members in encoderGroups.items():
+            if group in members:
+                group = group + ' ' + encodeGroup
+                logging.info("Group found: " + encodeGroup)
+                break
+
         logging.info("Group: " + group)
         # Get Edition
         if arg.edition:
@@ -679,6 +687,42 @@ def main():
             logging.critical(result)
 
 
+def notifyTaskbarIcon():
+    # Define the path to the executable file
+    executable_path = os.path.abspath(__file__)
+
+    # Define the FLASHW_TRAY flag to flash the taskbar button
+    FLASHW_TRAY = 0x00000002
+
+    # Define the FLASHW_TIMERNOFG flag to flash continuously
+    FLASHW_TIMERNOFG = 0x0000000C
+
+    # Define the structure for the FLASHWINFO object
+    class FLASHWINFO(ctypes.Structure):
+        _fields_ = [
+            ('cbSize', ctypes.c_uint),
+            ('hwnd', ctypes.c_void_p),
+            ('dwFlags', ctypes.c_uint),
+            ('uCount', ctypes.c_uint),
+            ('dwTimeout', ctypes.c_uint),
+        ]
+
+    # Get a handle to the current process window
+    hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+
+    # Define the FLASHWINFO object with the appropriate parameters
+    flash = FLASHWINFO(
+        ctypes.sizeof(FLASHWINFO),
+        hwnd,
+        FLASHW_TRAY | FLASHW_TIMERNOFG,
+        0,
+        0,
+    )
+
+    # Call the FlashWindowEx function to flash the taskbar button
+    ctypes.windll.user32.FlashWindowEx(ctypes.byref(flash))
+
+
 def uploadToPTPIMG(imageFile: str, api_key):
     # Stole this code from https://github.com/DeadNews/images-upload-cli
     response = requests.post(
@@ -833,6 +877,7 @@ def getUserInput(question: str):
     question = question + " [y, n]"
     Userinput = None
     while Userinput not in ["y", "yes", "n", "no"]:
+        notifyTaskbarIcon()
         Userinput = input(question)
         if Userinput in ["y", "yes"]:
             return True
@@ -907,9 +952,9 @@ def getInfoDump(filePath: str, runDir: str):
     # don't ask, the output looks fine in the terminal, but writing it
     # to a file adds empty lines every second line. This deletes them
     logging.info("Creating mediainfo dump at " + runDir + DUMPFILE)
-    with open(runDir + DUMPFILE, "w") as f:
+    with open(runDir + DUMPFILE, "w", encoding='utf-8') as f:
         f.write(output)
-    with open(runDir + DUMPFILE, "r") as fi:
+    with open(runDir + DUMPFILE, "r", encoding='utf-8') as fi:
         # Get the lines from the file
         lines = fi.readlines()
 
@@ -924,7 +969,7 @@ def getInfoDump(filePath: str, runDir: str):
                 new_lines.append(line)
 
     # Open the file in write mode
-    with open(runDir + DUMPFILE, 'w') as fo:
+    with open(runDir + DUMPFILE, 'w', encoding='utf-8') as fo:
         # Write the modified lines to the file
         for line in new_lines:
             fo.write(line)
