@@ -351,7 +351,7 @@ def main():
         logging.info("Screenshots loaded...")
         imgbb_brokey = False
         for image in images:
-            ptpupload = False    
+            ptpupload = False
             logging.info(f"Uploading {image}")
             # Open the file and read the data
             filePath = runDir + "screenshots" + os.sep + image
@@ -366,15 +366,19 @@ def main():
             #     wrapped_file = CallbackIOWrapper(t.update, payload)
             #     requests.put(api_endpoint, data=wrapped_file)
             try:
+                if imgbb_brokey:
+                    raise Exception
                 response = requests.post(api_endpoint, payload)
                 # Get the image URL from the response
                 image_url = response.json()
                 test_value = response.json()["data"]["url"]
                 test_value_2 = response.json()["data"]["url_viewer"]
             except Exception:
-                logging.error("Failed to upload to imgbb. It's probably down.")
-                if ptpimg_api:
+                if not imgbb_brokey:
+                    logging.error("Failed to upload to imgbb. It's probably down.")
                     logging.info("PTPImg API exists. Attempting to upload there...")
+                imgbb_brokey = True
+                if ptpimg_api:
                     image_url = uploadToPTPIMG(filePath, ptpimg_api)
                     ptpupload = True
             logging.debug(image_url)
