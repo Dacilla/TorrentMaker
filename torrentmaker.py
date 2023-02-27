@@ -264,9 +264,16 @@ def main():
     logging.info(pformat(guessItOutput))
     if 'release_group' in str(guessItOutput):
         group = guessItOutput['release_group']
+    if arg.tmdb is None and 'title' in str(guessItOutput):
+        logging.info("No TMDB ID given. Attempting to find it automatically...")
+        tmdbID = get_tmdb_id(guessItOutput['title'], tmdb_api)
+        logging.info(f"TMDB ID Found: {tmdbID}")
+    else:
+        tmdbID = arg.tmdb
+
     mediaInfoText = mediaInfoText.strip()
     mediaInfoText = json.loads(mediaInfoText)
-    if arg.tmdb:
+    if tmdbID:
         if tmdb_api == "":
             logging.error("TMDB_API field not filled in settings.ini")
             sys.exit()
@@ -274,7 +281,7 @@ def main():
         logging.info("Getting TMDB description")
 
         # Replace TV_SHOW_ID with the ID of the TV show you want to get the description for
-        tv_show_id = arg.tmdb
+        tv_show_id = tmdbID
 
         # Build the URL for the API request
         if arg.movie:
@@ -362,15 +369,13 @@ def main():
                 "key": imgbb_api,
                 "image": b64encode(file_data),
             }
-            # with tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024) as t:
-            #     wrapped_file = CallbackIOWrapper(t.update, payload)
-            #     requests.put(api_endpoint, data=wrapped_file)
             try:
                 if imgbb_brokey:
                     raise Exception
                 response = requests.post(api_endpoint, payload)
                 # Get the image URL from the response
                 image_url = response.json()
+                logging.info(pformat(image_url))
                 test_value = response.json()["data"]["url"]
                 test_value_2 = response.json()["data"]["url_viewer"]
             except Exception:
@@ -419,7 +424,7 @@ def main():
     torrent.path = path
     torrent.trackers = huno_url
     torrentFileName = "generatedTorrent.torrent"
-    if arg.tmdb:
+    if tmdbID:
         # Create torrent file name from TMDB and Mediainfo
         # Template:
         # TV: ShowName (Year) S00 (1080p BluRay x265 SDR DD 5.1 Language - Group) [REPACK]
@@ -471,7 +476,7 @@ def main():
         if 'HEVC' in mediaInfoText['media']['track'][1]['Format']:
             if 'remux' in file.lower().replace('.', ''):
                 videoCodec = 'HEVC'
-            elif 'h265' in file.lower().replace('.', ''):
+            elif 'h265' in file.lower().replace('.', '') or 'hevc' in file.lower().replace('.', ''):
                 videoCodec = 'H265'
             else:
                 videoCodec = "x265"
@@ -609,7 +614,11 @@ def main():
             IMDB_ID = tmdbtoIMDDdata['imdb_id']
             TVDB_ID = tmdbtoIMDDdata['tvdb_id']
         # Get description
-        IMDB_ID = int(re.findall(r'\d+', IMDB_ID)[0])
+        try:
+            IMDB_ID = int(re.findall(r'\d+', IMDB_ID)[0])
+        except Exception:
+            logging.info(f"Failed to find the IMDB ID from '{tmdbtoIMDDdata['imdb_id']}'. Please input just the numbers of the IMDB ID:")
+            IMDB_ID = input()
         with open(runDir + "showDesc.txt", "r") as descFile:
             description = descFile.read()
 
@@ -629,7 +638,7 @@ def main():
             'category_id': category,
             'type_id': type_id,
             'resolution_id': resolution_id,
-            'tmdb': arg.tmdb,
+            'tmdb': int(tmdbID),
             'imdb': IMDB_ID,
             'tvdb': TVDB_ID,
             'description': f'''{description}''',
@@ -689,6 +698,32 @@ def main():
             logging.info("Torrent successfully injected.")
         else:
             logging.critical(result)
+
+
+def get_tmdb_id(name, api_key):
+    """
+    Returns the TMDB ID of a TV show or movie given its name.
+    """
+    # The base URL for the TMDB API
+    base_url = "https://api.themoviedb.org/3"
+
+    # The endpoint for searching for TV shows or movies by name
+    search_endpoint = "/search/multi"
+
+    # Construct the full URL for the search endpoint, with the query parameters
+    url = f"{base_url}{search_endpoint}?api_key={api_key}&query={name}"
+
+    # Send a GET request to the API to search for the TV show or movie
+    response = requests.get(url)
+
+    # Parse the response JSON to get the TMDB ID of the first result
+    results = response.json()["results"]
+    if len(results) > 0:
+        tmdb_id = results[0]["id"]
+        return tmdb_id
+
+    # If there are no results, return None
+    return None
 
 
 def notifyTaskbarIcon():
@@ -766,7 +801,7 @@ def check_folder_for_episode(folder_path):
 
 
 def get_colour_space(mediaInfo):
-    if "HDR" not in mediaInfo:
+    if "HDR" not in str(mediaInfo):
         return "SDR"
     if "Dolby Vision" in mediaInfo['media']['track'][1]['HDR_Format']:
         if "HDR10" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
