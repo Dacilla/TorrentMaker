@@ -287,8 +287,8 @@ def main():
         title = guessItOutput['title']
         if 'country' in guessItOutput:
             title = title + f" {guessItOutput['country'].alpha2}"
-        if 'year' in guessItOutput and guessItOutput['type'] == 'movie':
-            title = title + f" {guessItOutput['year']}"
+        # if 'year' in guessItOutput and guessItOutput['type'] == 'movie':
+        #     title = title + f" {guessItOutput['year']}"
         tmdbID = get_tmdb_id(title, tmdb_api)
         if tmdbID:
             logging.info(f"TMDB ID Found: {tmdbID}")

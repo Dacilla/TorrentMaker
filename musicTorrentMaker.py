@@ -25,13 +25,15 @@ __VERSION = "1.0.0"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+BULK_DOWNLOAD_FILE = os.getcwd() + os.sep + "bulkDownload.txt"
+
 
 def main():
     parser = argparse.ArgumentParser(
         description="Script to automate creation of torrent files, as well as grabbing mediainfo dump, screenshots, and tmdb description"
     )
     parser.add_argument(
-        "path", action="store",
+        "-p", "--path", action="store",
         help="Path for file or folder to create .torrent file for",
         type=str
     )
@@ -99,6 +101,25 @@ def main():
 
         sys.exit("settings.ini file generated. Please fill out before running again")
 
+    pathList = []
+    if not arg.path:
+        logging.info(f"No explicit path given, reading {BULK_DOWNLOAD_FILE}")
+        if not os.path.exists(BULK_DOWNLOAD_FILE):
+            logging.warning(f"No {BULK_DOWNLOAD_FILE} file found. Creating...")
+            with open(BULK_DOWNLOAD_FILE, 'w') as f:
+                f.write("")
+        with open(BULK_DOWNLOAD_FILE, 'r') as dlFile:
+            file_contents = dlFile.read()
+            if len(file_contents) == 0:
+                logging.error(f"No path given in either arg.path or {BULK_DOWNLOAD_FILE}. Exiting...")
+                sys.exit(-1)
+            print(f"File contents: {file_contents}")
+            for line in file_contents.split('\n'):
+                pathList.append(line.strip().replace("\"", ""))
+                print(f"Added {line.strip()} to pathList")
+        logging.info("Loaded " + str(len(pathList)) + " paths...")
+    else:
+        pathList.append(arg.path)
     # Load the INI file
     config = configparser.ConfigParser()
     config.read('settings.ini')
@@ -113,77 +134,78 @@ def main():
     if ptpimg_api == '':
         ptpimg_api = None
 
-    if not os.path.isdir("runs"):
-        os.mkdir("runs")
-        os.mkdir(f"runs{os.sep}001")
-        runDir = os.getcwd() + os.sep + "runs" + os.sep + "001" + os.sep
-    elif not has_folders("runs"):
-        os.mkdir(f"runs{os.sep}001")
-        runDir = os.getcwd() + os.sep + "runs" + os.sep + "001" + os.sep
-    else:
-        fileList = os.listdir("runs")
-        maxValue = max(int(dirname) for dirname in fileList)
-        logging.info("Last run number found: " + str(maxValue))
-        # if not delete_if_no_torrent(os.getcwd() + os.sep + "runs" + os.sep + str(maxValue).zfill(3)):
-        #     maxValue = maxValue + 1
-        #     logging.info("Found directory does not have finished .torrent file. Directory Deleted.")
-        maxValue = maxValue + 1
-        maxValue = str(maxValue).zfill(3)
-        os.mkdir("runs" + os.sep + maxValue)
-        runDir = os.getcwd() + os.sep + "runs" + os.sep + maxValue + os.sep
-
-    logging.info("Run directory: " + runDir)
-    logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
-
-    if arg.format:
-        logging.info("Formatting mode enabled...")
-        add_track_position(arg.path)
-
-    logging.info("Checking for missing tracks...")
-    missingTracksList = check_missing_tracks(arg.path)
-    if len(missingTracksList) > 0:
-        logging.warning(f"Missing tracks found :{pformat(missingTracksList)} not allowed on RED")
-        sys.exit(-1)
-    logging.info("No missing tracks found.")
-    logging.info("Generating track list...")
-    create_track_list(arg.path, runDir + "trackData.txt")
-
-    logging.info("Creating torrent file")
-    torrent = torf.Torrent()
-    torrent.private = True
-    torrent.source = "RED"
-    torrent.path = arg.path
-    torrent.trackers = red_url
-    torrentFileName = os.path.basename(arg.path).strip() + ".torrent"
-    head, tail = os.path.split(arg.path)
-    headBasename = os.path.basename(head)
-    postName = os.path.basename(arg.path)
-    if head != SEEDING_DIR:
-        logging.info("Attempting to create hardlinks for easy seeding...")
-        destination = os.path.join(SEEDING_DIR, postName.strip())
-        copy_folder_structure(arg.path, destination)
-        logging.info("Hardlinks created at " + destination)
-        torrent.path = destination
-    logging.info("Generating torrent file hash. This will take a long while...")
-    success = torrent.generate(callback=cb, interval=0.25)
-    logging.info("Writing torrent file to disk...")
-    torrent.write(runDir + torrentFileName)
-    logging.info("Torrent file wrote to " + torrentFileName)
-
-    if (arg.cover or os.path.exists(arg.path + os.sep + "cover.jpg") or os.path.exists(arg.path + os.sep + "cover.png")) and ptpimg_api:
-        if os.path.exists(arg.path + os.sep + "cover.jpg"):
-            cover = arg.path + os.sep + "cover.jpg"
-        elif os.path.exists(arg.path + os.sep + "cover.png"):
-            cover = arg.path + os.sep + "cover.png"
+    for path in pathList:
+        if not os.path.isdir("runs"):
+            os.mkdir("runs")
+            os.mkdir(f"runs{os.sep}001")
+            runDir = os.getcwd() + os.sep + "runs" + os.sep + "001" + os.sep
+        elif not has_folders("runs"):
+            os.mkdir(f"runs{os.sep}001")
+            runDir = os.getcwd() + os.sep + "runs" + os.sep + "001" + os.sep
         else:
-            cover = arg.cover
-        logging.info("Uploading cover image to ptpimg")
-        logging.info("Cover image path: " + cover)
-        coverImgURL = uploadToPTPIMG(cover, ptpimg_api)
-        with open(runDir + "coverImgURL.txt", 'w') as file:
-            file.write(coverImgURL)
-        logging.info("Cover image uploaded and URL added to " + runDir + "coverImgURL.txt")
-        logging.info("URL: " + coverImgURL)
+            fileList = os.listdir("runs")
+            maxValue = max(int(dirname) for dirname in fileList)
+            logging.info("Last run number found: " + str(maxValue))
+            # if not delete_if_no_torrent(os.getcwd() + os.sep + "runs" + os.sep + str(maxValue).zfill(3)):
+            #     maxValue = maxValue + 1
+            #     logging.info("Found directory does not have finished .torrent file. Directory Deleted.")
+            maxValue = maxValue + 1
+            maxValue = str(maxValue).zfill(3)
+            os.mkdir("runs" + os.sep + maxValue)
+            runDir = os.getcwd() + os.sep + "runs" + os.sep + maxValue + os.sep
+
+        logging.info("Run directory: " + runDir)
+        logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
+
+        if arg.format:
+            logging.info("Formatting mode enabled...")
+            add_track_position(path)
+
+        logging.info("Checking for missing tracks...")
+        missingTracksList = check_missing_tracks(path)
+        if len(missingTracksList) > 0:
+            logging.warning(f"Missing tracks found :{pformat(missingTracksList)} not allowed on RED")
+            sys.exit(-1)
+        logging.info("No missing tracks found.")
+        logging.info("Generating track list...")
+        create_track_list(path, runDir + "trackData.txt")
+
+        logging.info("Creating torrent file")
+        torrent = torf.Torrent()
+        torrent.private = True
+        torrent.source = "RED"
+        torrent.path = path
+        torrent.trackers = red_url
+        torrentFileName = os.path.basename(path).strip() + ".torrent"
+        head, tail = os.path.split(path)
+        headBasename = os.path.basename(head)
+        postName = os.path.basename(path)
+        if head != SEEDING_DIR:
+            logging.info("Attempting to create hardlinks for easy seeding...")
+            destination = os.path.join(SEEDING_DIR, postName.strip())
+            copy_folder_structure(path, destination)
+            logging.info("Hardlinks created at " + destination)
+            torrent.path = destination
+        logging.info("Generating torrent file hash. This will take a long while...")
+        success = torrent.generate(callback=cb, interval=0.25)
+        logging.info("Writing torrent file to disk...")
+        torrent.write(runDir + torrentFileName)
+        logging.info("Torrent file wrote to " + torrentFileName)
+
+        if (arg.cover or os.path.exists(path + os.sep + "cover.jpg") or os.path.exists(path + os.sep + "cover.png")) and ptpimg_api:
+            if os.path.exists(path + os.sep + "cover.jpg"):
+                cover = path + os.sep + "cover.jpg"
+            elif os.path.exists(path + os.sep + "cover.png"):
+                cover = path + os.sep + "cover.png"
+            else:
+                cover = arg.cover
+            logging.info("Uploading cover image to ptpimg")
+            logging.info("Cover image path: " + cover)
+            coverImgURL = uploadToPTPIMG(cover, ptpimg_api)
+            with open(runDir + "coverImgURL.txt", 'w') as file:
+                file.write(coverImgURL)
+            logging.info("Cover image uploaded and URL added to " + runDir + "coverImgURL.txt")
+            logging.info("URL: " + coverImgURL)
 
 
 def check_missing_tracks(directory):
