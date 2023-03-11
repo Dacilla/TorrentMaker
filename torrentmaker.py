@@ -30,6 +30,7 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 DUMPFILE = "mediainfo.txt"
 SEEDING_DIR = f"S:{os.sep}Auto Downloads"
 
+# TODO: Add support for providing a torrent hash to skip the hashing process
 # TODO: Support anime with MAL ID (HUNO API Doesn't support MAL atm)
 # TODO: Add detection of bluray extras
 # TODO: Download Mediainfo if it's not found
@@ -71,6 +72,13 @@ def main():
         action="store",
         type=str,
         help="Group name of the torrent creator",
+        default=None
+    )
+    parser.add_argument(
+        "--hash",
+        action="store",
+        type=str,
+        help="Pre-made hash of the torrent file. Will skip the hashing process.",
         default=None
     )
     parser.add_argument(
@@ -173,6 +181,7 @@ def main():
             'IMGBB_API': '',
             'QBIT_USERNAME': '',
             'QBIT_PASSWORD': '',
+            'QBIT_HOST': '',
             'HUNO_URL': '',
             'PTPIMG_API': ''
         }
@@ -190,6 +199,7 @@ def main():
     imgbb_api = config['DEFAULT']['IMGBB_API']
     qbit_username = config['DEFAULT']['QBIT_USERNAME']
     qbit_password = config['DEFAULT']['QBIT_PASSWORD']
+    qbit_host = config['DEFAULT']['QBIT_HOST']
     huno_url = config['DEFAULT']['HUNO_URL']
     ptpimg_api = config['DEFAULT']['PTPIMG_API']
     if ptpimg_api == '':
@@ -214,6 +224,14 @@ def main():
 
     path = arg.path
     isFolder = FileOrFolder(path)
+
+    if arg.hash:
+        if is_valid_torf_hash(arg.hash):
+            torrentHash = convert_sha1_hash(arg.hash)
+        else:
+            logging.warning("Given hash is not valid. Will regenerate valid hash.")
+    else:
+        torrentHash = None
 
     if isFolder not in [1, 2]:
         logging.error("Input not a file or directory")
@@ -260,14 +278,22 @@ def main():
                 logging.debug(pformat(json.loads(mediaInfoText)))
                 break
     logging.info("Mediainfo dump created")
-    guessItOutput = dict(guessit.guessit(videoFile))
+    guessItOutput = dict(guessit.guessit(videoFile, ))
     logging.info(pformat(guessItOutput))
     if 'release_group' in str(guessItOutput):
         group = guessItOutput['release_group']
     if arg.tmdb is None and 'title' in str(guessItOutput):
         logging.info("No TMDB ID given. Attempting to find it automatically...")
-        tmdbID = get_tmdb_id(guessItOutput['title'], tmdb_api)
-        logging.info(f"TMDB ID Found: {tmdbID}")
+        title = guessItOutput['title']
+        if 'country' in guessItOutput:
+            title = title + f" {guessItOutput['country'].alpha2}"
+        if 'year' in guessItOutput and guessItOutput['type'] == 'movie':
+            title = title + f" {guessItOutput['year']}"
+        tmdbID = get_tmdb_id(title, tmdb_api)
+        if tmdbID:
+            logging.info(f"TMDB ID Found: {tmdbID}")
+        else:
+            tmdbID = input("Failed to find TMDB ID. Please input:\n")
     else:
         tmdbID = arg.tmdb
 
@@ -297,7 +323,7 @@ def main():
         logging.debug(pformat(tmdbData))
         # Print the description of the TV show
         logging.debug("description gotten: " + tmdbData['overview'])
-        with open(runDir + "showDesc.txt", "w") as fb:
+        with open(runDir + "showDesc.txt", "w", encoding='utf-8') as fb:
             fb.write(tmdbData['overview'] + "\n\n")
         logging.info("TMDB Description dumped to showDesc.txt")
 
@@ -335,7 +361,7 @@ def main():
             if qbit_username != "" and qbit_password != "":
                 logging.info("Attempting to enable qbit upload speed limit")
                 logging.info("Logging in to qbit...")
-                qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=qbit_username, password=qbit_password)
+                qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password)
                 transfer_info = qb.transfer_info()
                 uniqueUploadLimit = random.randint(900000, 1000000)
                 if qb.transfer_upload_limit() == 0:
@@ -375,9 +401,9 @@ def main():
                 response = requests.post(api_endpoint, payload)
                 # Get the image URL from the response
                 image_url = response.json()
-                logging.info(pformat(image_url))
-                test_value = response.json()["data"]["url"]
-                test_value_2 = response.json()["data"]["url_viewer"]
+                if response.status_code != 200:
+                    logging.warning(pformat(image_url))
+                    raise Exception
             except Exception:
                 if not imgbb_brokey:
                     logging.error("Failed to upload to imgbb. It's probably down.")
@@ -405,7 +431,7 @@ def main():
         if arg.upload:
             logging.info("Attempting to disable qbit upload speed limit")
             logging.info("Logging in to qbit...")
-            qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=qbit_username, password=qbit_password)
+            qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, )
             transfer_info = qb.transfer_info()
             logging.info("Qbit upload limit: " + str(qb.transfer_upload_limit()))
             logging.info("Comparing to: " + str(uniqueUploadLimit))
@@ -424,6 +450,8 @@ def main():
     torrent.path = path
     torrent.trackers = huno_url
     torrentFileName = "generatedTorrent.torrent"
+    if torrentHash:
+        torrent.hashes = torrentHash
     if tmdbID:
         # Create torrent file name from TMDB and Mediainfo
         # Template:
@@ -484,6 +512,8 @@ def main():
             videoCodec = "VC-1"
         elif 'remux' in file.lower():
             videoCodec = "AVC"
+        elif 'x264' in file.lower():
+            videoCodec = "x264"
         else:
             videoCodec = "H264"
         logging.info("Video Codec: " + videoCodec)
@@ -509,16 +539,16 @@ def main():
         # Check for banned group
         if 'WEB' in videoCodec:
             if group in bannedEncoders['WEB']:
-                logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
+                logging.info(f"Group '{group}' is banned on HUNO. Cannot upload there")
                 if arg.huno:
                     sys.exit()
-        if 'REMUX' in videoCodec:
+        if 'REMUX' in file.lower():
             if group in bannedEncoders['REMUX']:
-                logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
+                logging.info(f"Group '{group}' is banned on HUNO. Cannot upload there")
                 if arg.huno:
                     sys.exit()
         if group in bannedEncoders['ENCODE']:
-            logging.info(f"Group '{group}' in banned on HUNO. Cannot upload there")
+            logging.info(f"Group '{group}' is banned on HUNO. Cannot upload there")
             if arg.huno:
                 sys.exit()
 
@@ -617,13 +647,16 @@ def main():
         try:
             IMDB_ID = int(re.findall(r'\d+', IMDB_ID)[0])
         except Exception:
-            logging.info(f"Failed to find the IMDB ID from '{tmdbtoIMDDdata['imdb_id']}'. Please input just the numbers of the IMDB ID:")
+            if arg.movie:
+                logging.info(f"Failed to find the IMDB ID from '{IMDB_ID}'. Please input just the numbers of the IMDB ID:")
+            else:
+                logging.info(f"Failed to find the IMDB ID from '{tmdbtoIMDDdata['imdb_id']}'. Please input just the numbers of the IMDB ID:")
             IMDB_ID = input()
         with open(runDir + "showDesc.txt", "r") as descFile:
             description = descFile.read()
 
         # Get MediaInfo Dump
-        with open(runDir + "mediainfo.txt", "r") as infoFile:
+        with open(runDir + "mediainfo.txt", "r", encoding='UTF-8') as infoFile:
             mediaInfoDump = infoFile.read()
 
         # Get post name
@@ -673,7 +706,7 @@ def main():
     if arg.inject:
         logging.info("Qbittorrent injection enabled")
         logging.info("Logging in to qbit...")
-        qb = qbittorrentapi.Client("http://192.168.1.114:8080", username=qbit_username, password=qbit_password)
+        qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password)
         # try:
         #     qb.auth_log_in()
         # except qbittorrentapi.LoginFailed as e:
@@ -700,11 +733,31 @@ def main():
             logging.critical(result)
 
 
+def convert_sha1_hash(hash_str):
+    """Converts a SHA-1 hash value to the format used by torf."""
+    hash_bytes = bytes.fromhex(hash_str)
+    hash_pieces = [hash_bytes[i:i+20] for i in range(0, len(hash_bytes), 20)]
+    return b''.join(hash_pieces)
+
+
+def is_valid_torf_hash(hash_str):
+    """Checks if a string is a valid SHA-1 hash value for torf."""
+    try:
+        hash_bytes = bytes.fromhex(hash_str)
+        if len(hash_bytes) != 20:
+            return False
+        return True
+    except ValueError:
+        return False
+
+
 def get_tmdb_id(name, api_key):
     """
     Returns the TMDB ID of a TV show or movie given its name.
     """
     # The base URL for the TMDB API
+    logging.info("Looking for title: " + name)
+
     base_url = "https://api.themoviedb.org/3"
 
     # The endpoint for searching for TV shows or movies by name
@@ -829,7 +882,10 @@ def get_audio_info(mediaInfo):
             commercialFormat = mediaInfo['media']['track'][2]['Format_Commercial_IfAny']
             if "Dolby Digital" in commercialFormat:
                 if "Plus" in commercialFormat:
-                    audioFormat = "DDP"
+                    if "Atmos" in commercialFormat:
+                        audioFormat = "DDP Atmos"
+                    else:
+                        audioFormat = "DDP"
                 else:
                     audioFormat = "DD"
             elif "TrueHD" in commercialFormat:
