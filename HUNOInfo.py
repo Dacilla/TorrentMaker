@@ -3,4 +3,5 @@ bannedEncoders = {'REMUX': ['4K4U'],
                   'ENCODE': ['Bearfish', 'BiTOR', 'BONE', 'D3FiL3R', 'd3g', 'DTR', 'ELiTE', 'EVO', 'eztv', 'EzzRips', 'HashMiner', 'HETeam', 'HEVCBay', 'HiQVE', 'HR-DR', 'iFT', 'ION265', 'JATT', 'Joy', 'm3th', 'MeGusta', 'MRN', 'Musafirboy', 'PHOCiS', 'PSA', 'RARBG', 'RMTeam', 'ShieldBearer', 'SiQ', 'TBD', 'TSP', 'VXT', 'YAWNiX', 'YIFY', 'YTS']}
 encoderGroups = {'HONE': ['Weasley', 'Yogi', 'cYpHer', 'DiscoD'],
                  'QxR': ['Tigole', 'FreetheFish', 'MONOLITH', 'ImE', 'afm72', 'Silence', 'RZeroX', 'Natty', 'Ghost', 'SAMPA', 'Panda', 'RCVR', 't3nzin', 'Kappa', 'LION'],
-                 'TAoE': ['Goki', 'JBENT', 'Erie', 'DNU', 'DrainedDay', 'r0b0t', 'WEM', 'xtrem3x', 'Frys', 'Ainz', 'Species180', 'TheSickle', 'ArcX']}
+                 'TAoE': ['Goki', 'JBENT', 'Erie', 'DNU', 'DrainedDay', 'r0b0t', 'WEM', 'xtrem3x', 'Frys', 'Ainz', 'Species180', 'TheSickle', 'ArcX'],
+                 'UTR': ['ByteShare']}

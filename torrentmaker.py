@@ -282,6 +282,9 @@ def main():
     logging.info(pformat(guessItOutput))
     if 'release_group' in str(guessItOutput):
         group = guessItOutput['release_group']
+        # remove any kinds of brackets from group name
+        group = re.sub(r"[\[\]\(\)\{\}]", "", group)
+        group = group.split()[0]
     if arg.tmdb is None and 'title' in str(guessItOutput):
         logging.info("No TMDB ID given. Attempting to find it automatically...")
         title = guessItOutput['title']
@@ -877,9 +880,19 @@ def get_audio_info(mediaInfo):
         "Opus": "OPUS"
     }
     audioFormat = None
-    if 'Format_Commercial_IfAny' in str(mediaInfo['media']['track'][2]):
-        if mediaInfo['media']['track'][2]['Format_Commercial_IfAny']:
-            commercialFormat = mediaInfo['media']['track'][2]['Format_Commercial_IfAny']
+    trackNum = None
+    for num, track in enumerate(mediaInfo['media']['track']):
+        if track['@type'] == "Audio":
+            trackNum = num
+            break
+
+    if trackNum in None:
+        logging.warning("No audio track found!")
+        return ""
+
+    if 'Format_Commercial_IfAny' in str(mediaInfo['media']['track'][trackNum]):
+        if mediaInfo['media']['track'][trackNum]['Format_Commercial_IfAny']:
+            commercialFormat = mediaInfo['media']['track'][trackNum]['Format_Commercial_IfAny']
             if "Dolby Digital" in commercialFormat:
                 if "Plus" in commercialFormat:
                     if "Atmos" in commercialFormat:
@@ -897,14 +910,14 @@ def get_audio_info(mediaInfo):
                     audioFormat = "DTS-HD MA"
 
     if audioFormat is None:
-        if mediaInfo['media']['track'][2]['Format'] in codecsDict:
-            audioFormat = codecsDict[mediaInfo['media']['track'][2]['Format']]
+        if mediaInfo['media']['track'][trackNum]['Format'] in codecsDict:
+            audioFormat = codecsDict[mediaInfo['media']['track'][trackNum]['Format']]
 
     if audioFormat is None:
         logging.error("Audio format was not found")
     # Channels
-    channelsNum = mediaInfo['media']['track'][2]['Channels']
-    channelsLayout = mediaInfo['media']['track'][2]['ChannelLayout']
+    channelsNum = mediaInfo['media']['track'][trackNum]['Channels']
+    channelsLayout = mediaInfo['media']['track'][trackNum]['ChannelLayout']
     if "LFE" in channelsLayout:
         channelsNum = str(int(channelsNum) - 1)
         channelsNum2 = ".1"
@@ -1002,7 +1015,7 @@ def get_season(filename: str):
         return match.group(0)
     else:
         # If no match is found, return an empty string
-        return input('Season number was not found. Please input in the format S00')
+        return input('Season number was not found. Please input in the format S00\n')
 
 
 def get_language_name(language_code):
