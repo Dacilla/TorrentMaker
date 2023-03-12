@@ -580,6 +580,13 @@ def main():
             torrentFileName = f"{showName} ({year}) {season}{episode}{edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         else:
             torrentFileName = f"{showName} ({year}) {season}{edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
+
+        # Define the regular expression pattern to match invalid characters
+        pattern = r'[<>:"/\\|?*\x00-\x1F\x7F]'
+
+        # Use the re.sub() method to remove any invalid characters from the filename
+        torrentFileName = re.sub(pattern, "", torrentFileName)
+
         logging.info("Final name: " + torrentFileName)
 
         if arg.huno and arg.inject:
@@ -886,7 +893,7 @@ def get_audio_info(mediaInfo):
             trackNum = num
             break
 
-    if trackNum in None:
+    if trackNum is None:
         logging.warning("No audio track found!")
         return ""
 
