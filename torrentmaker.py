@@ -283,7 +283,7 @@ def main():
     if 'release_group' in str(guessItOutput):
         group = guessItOutput['release_group']
         # remove any kinds of brackets from group name
-        group = re.sub(r"[\[\]\(\)\{\}]", "", group)
+        group = re.sub(r"[\[\]\(\)\{\}]", " ", group)
         group = group.split()[0]
     if arg.tmdb is None and 'title' in str(guessItOutput):
         logging.info("No TMDB ID given. Attempting to find it automatically...")
@@ -323,6 +323,7 @@ def main():
 
         # Get the JSON data from the response
         tmdbData = response.json()
+        originalLanguange = response.json()['original_language']
         logging.debug(pformat(tmdbData))
         # Print the description of the TV show
         logging.debug("description gotten: " + tmdbData['overview'])
@@ -364,23 +365,26 @@ def main():
             if qbit_username != "" and qbit_password != "":
                 logging.info("Attempting to enable qbit upload speed limit")
                 logging.info("Logging in to qbit...")
-                qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password)
-                transfer_info = qb.transfer_info()
-                uniqueUploadLimit = random.randint(900000, 1000000)
-                if qb.transfer_upload_limit() == 0:
-                    qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
-                    uploadLimitEnabled = True
-                    uniqueUploadLimit = qb.transfer_upload_limit()
-                    logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
-                elif 900000 <= qb.transfer_upload_limit() <= 1000000:
-                    logging.info("Another instance of this script has already changed the upload limit. Overwriting...")
-                    qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
-                    uploadLimitEnabled = True
-                    uniqueUploadLimit = qb.transfer_upload_limit()
-                    logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
-                else:
-                    logging.info("Qbit upload limit already exists. Continuing...")
-                    uploadLimitEnabled = False
+                try:
+                    qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, REQUESTS_ARGS={'timeout': (60, 60)})
+                    transfer_info = qb.transfer_info()
+                    uniqueUploadLimit = random.randint(900000, 1000000)
+                    if qb.transfer_upload_limit() == 0:
+                        qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
+                        uploadLimitEnabled = True
+                        uniqueUploadLimit = qb.transfer_upload_limit()
+                        logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
+                    elif 900000 <= qb.transfer_upload_limit() <= 1000000:
+                        logging.info("Another instance of this script has already changed the upload limit. Overwriting...")
+                        qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
+                        uploadLimitEnabled = True
+                        uniqueUploadLimit = qb.transfer_upload_limit()
+                        logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
+                    else:
+                        logging.info("Qbit upload limit already exists. Continuing...")
+                        uploadLimitEnabled = False
+                except qbittorrentapi.APIConnectionError:
+                    logging.error("Failed to connect to Qbit API. Continuing anyway...")
         logging.info("Uploading screenshots to imgbb")
         api_endpoint = "https://api.imgbb.com/1/upload"
         images = os.listdir(f"{runDir}screenshots{os.sep}")
@@ -434,17 +438,22 @@ def main():
         if arg.upload:
             logging.info("Attempting to disable qbit upload speed limit")
             logging.info("Logging in to qbit...")
-            qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, )
-            transfer_info = qb.transfer_info()
-            logging.info("Qbit upload limit: " + str(qb.transfer_upload_limit()))
-            logging.info("Comparing to: " + str(uniqueUploadLimit))
-            if qb.transfer_upload_limit() == uniqueUploadLimit:
-                qb.transfer_set_upload_limit(limit=0)
-                uploadLimitEnabled = False
-                logging.info("Qbit upload limit successfully disabled.")
-            else:
-                logging.info("Qbit upload limit has already been changed. Continuing...")
-                uploadLimitEnabled = True
+            try:
+                qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, REQUESTS_ARGS={'timeout': (60, 60)})
+                transfer_info = qb.transfer_info()
+                logging.info("Qbit upload limit: " + str(qb.transfer_upload_limit()))
+                logging.info("Comparing to: " + str(uniqueUploadLimit))
+                if qb.transfer_upload_limit() == uniqueUploadLimit:
+                    qb.transfer_set_upload_limit(limit=0)
+                    uploadLimitEnabled = False
+                    logging.info("Qbit upload limit successfully disabled.")
+                else:
+                    logging.info("Qbit upload limit has already been changed. Continuing...")
+                    uploadLimitEnabled = True
+            except qbittorrentapi.APIConnectionError:
+                logging.error("Failed to connect to Qbit API. Continuing anyway...")
+            except UnboundLocalError:
+                logging.error("Failed to find uniqueUploadLimit. Continuing anyway...")
 
     logging.info("Creating torrent file")
     torrent = torf.Torrent()
@@ -462,7 +471,7 @@ def main():
         # MOVIE: ShowName (Year) EDITION (1080p BluRay x265 SDR DD 5.1 Language - Group) [REPACK]
         # pprint(mediaInfoText)
         if arg.movie:
-            showName: str = tmdbData['original_title']
+            showName: str = tmdbData['title']
         else:
             showName: str = tmdbData['name']
         showName = showName.replace(":", " -")
@@ -513,6 +522,8 @@ def main():
                 videoCodec = "x265"
         elif "VC-1" in mediaInfoText['media']['track'][1]['Format']:
             videoCodec = "VC-1"
+        elif "V_MPEG2" in mediaInfoText['media']['track'][1]['CodecID']:
+            videoCodec = "MPEG-2"
         elif 'remux' in file.lower():
             videoCodec = "AVC"
         elif 'x264' in file.lower():
@@ -524,8 +535,13 @@ def main():
         audio = get_audio_info(mediaInfoText)
         logging.info("Audio: " + audio)
         # Get language
-        if 'Language' in mediaInfoText['media']['track'][2]:
-            language = get_language_name(mediaInfoText['media']['track'][2]['Language'])
+        trackNum = None
+        for num, track in enumerate(mediaInfoText['media']['track']):
+            if track['@type'] == "Audio":
+                trackNum = num
+                break
+        if 'Language' in mediaInfoText['media']['track'][trackNum]:
+            language = get_language_name(mediaInfoText['media']['track'][trackNum]['Language'])
         else:
             language = input("No language found in audio data. Please input language:\n")
         logging.info("Language: " + language)
@@ -545,7 +561,7 @@ def main():
                 logging.info(f"Group '{group}' is banned on HUNO. Cannot upload there")
                 if arg.huno:
                     sys.exit()
-        if 'REMUX' in file.lower():
+        if 'remux' in file.lower():
             if group in bannedEncoders['REMUX']:
                 logging.info(f"Group '{group}' is banned on HUNO. Cannot upload there")
                 if arg.huno:
@@ -573,13 +589,18 @@ def main():
             repack = " [REPACK]"
         else:
             repack = ""
+        # Get if hybrid
+        if "hybrid" in file.lower():
+            hybrid = " Hybrid"
+        else:
+            hybrid = ""
         # Construct torrent name
         if arg.movie:
-            torrentFileName = f"{showName} ({year}){edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
+            torrentFileName = f"{showName} ({year}){edition} ({resolution} {source}{hybrid} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         elif arg.episode:
-            torrentFileName = f"{showName} ({year}) {season}{episode}{edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
+            torrentFileName = f"{showName} ({year}) {season}{episode}{edition} ({resolution} {source}{hybrid} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
         else:
-            torrentFileName = f"{showName} ({year}) {season}{edition} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
+            torrentFileName = f"{showName} ({year}) {season}{edition} ({resolution} {source}{hybrid} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
 
         # Define the regular expression pattern to match invalid characters
         pattern = r'[<>:"/\\|?*\x00-\x1F\x7F]'
@@ -715,32 +736,29 @@ def main():
 
     if arg.inject:
         logging.info("Qbittorrent injection enabled")
-        logging.info("Logging in to qbit...")
-        qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password)
-        # try:
-        #     qb.auth_log_in()
-        # except qbittorrentapi.LoginFailed as e:
-        #     print(e)
-        #     sys.exit()
-        # except Exception as e:
-        #     print(e)
-        #     sys.exit()
-        logging.info("Logged in to qbit")
-        torrent_file = runDir + torrentFileName
-        torrent_file = rf"{torrent_file}"
-        logging.info(f"Injecting {torrent_file} to qbit...")
         if arg.huno:
+            category = "HUNO"
             paused = False
         else:
             paused = True
-        try:
-            result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category="HUNO", tags="Self-Upload", rename=postName)
-        except Exception as e:
-            print(e)
-        if result == "Ok.":
-            logging.info("Torrent successfully injected.")
-        else:
-            logging.critical(result)
+        qbitInject(qbit_host=qbit_host, qbit_username=qbit_username, qbit_password=qbit_password, category=category, runDir=runDir, torrentFileName=torrentFileName, paused=paused, postName=postName)
+
+
+def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torrentFileName, paused, postName):
+    logging.info("Logging in to qbit...")
+    qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, REQUESTS_ARGS={'timeout': (60, 60)})
+    logging.info("Logged in to qbit")
+    torrent_file = runDir + torrentFileName
+    torrent_file = rf"{torrent_file}"
+    logging.info(f"Injecting {torrent_file} to qbit...")
+    try:
+        result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category=category, tags="Self-Upload", rename=postName)
+    except Exception as e:
+        print(e)
+    if result == "Ok.":
+        logging.info("Torrent successfully injected.")
+    else:
+        logging.critical(result)
 
 
 def convert_sha1_hash(hash_str):
@@ -780,6 +798,7 @@ def get_tmdb_id(name, api_key):
     response = requests.get(url)
 
     # Parse the response JSON to get the TMDB ID of the first result
+    logging.debug(pformat(response.json()))
     results = response.json()["results"]
     if len(results) > 0:
         tmdb_id = results[0]["id"]
@@ -866,11 +885,16 @@ def check_folder_for_episode(folder_path):
 def get_colour_space(mediaInfo):
     if "HDR" not in str(mediaInfo):
         return "SDR"
-    if "Dolby Vision" in mediaInfo['media']['track'][1]['HDR_Format']:
-        if "HDR10" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
-            return "DV HDR"
-        else:
-            return "DV"
+    try:
+        if "Dolby Vision" in mediaInfo['media']['track'][1]['HDR_Format']:
+            if "HDR10" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
+                return "DV HDR"
+            else:
+                return "DV"
+    except KeyError:
+        logging.debug("Keyerror when looking for DV format")
+        if mediaInfo['media']['track'][1]['colour_primaries'] in ['BT.2020', 'DCI-P3'] or mediaInfo['media']['track'][1]['transfer_characteristics'] in ['PQ', 'HLG']:
+            return "HDR"
     return "HDR"
 
 
@@ -902,10 +926,7 @@ def get_audio_info(mediaInfo):
             commercialFormat = mediaInfo['media']['track'][trackNum]['Format_Commercial_IfAny']
             if "Dolby Digital" in commercialFormat:
                 if "Plus" in commercialFormat:
-                    if "Atmos" in commercialFormat:
-                        audioFormat = "DDP Atmos"
-                    else:
-                        audioFormat = "DDP"
+                    audioFormat = "DDP"
                 else:
                     audioFormat = "DD"
             elif "TrueHD" in commercialFormat:
@@ -915,6 +936,10 @@ def get_audio_info(mediaInfo):
                     audioFormat = "DTS-HD HR"
                 elif "Master Audio" in commercialFormat:
                     audioFormat = "DTS-HD MA"
+                elif "DTS-ES" in commercialFormat:
+                    audioFormat = "DTS-ES"
+            if 'Atmos' in commercialFormat:
+                audioFormat = audioFormat + " Atmos"
 
     if audioFormat is None:
         if mediaInfo['media']['track'][trackNum]['Format'] in codecsDict:
@@ -922,6 +947,7 @@ def get_audio_info(mediaInfo):
 
     if audioFormat is None:
         logging.error("Audio format was not found")
+
     # Channels
     channelsNum = mediaInfo['media']['track'][trackNum]['Channels']
     channelsLayout = mediaInfo['media']['track'][trackNum]['ChannelLayout']
@@ -982,7 +1008,10 @@ def copy_folder_structure(src_path, dst_path):
         dst_item_path = os.path.join(dst_path, item)
         # If the item is a file, hardlink it to the destination
         if os.path.isfile(src_item_path):
-            os.link(src_item_path, dst_item_path)
+            try:
+                os.link(src_item_path, dst_item_path)
+            except FileExistsError:
+                continue
         # If the item is a folder, recursively copy its contents
         elif os.path.isdir(src_item_path):
             copy_folder_structure(src_item_path, dst_item_path)
