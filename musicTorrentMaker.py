@@ -47,7 +47,7 @@ def main():
         "-s", "--source",
         action="store",
         type=str,
-        help="Source of the torrent files (E.g. Bluray Remux, WEB-DL)",
+        help="Source of the torrent files (E.g. WEB, CD)",
         default="WEB"
     )
     parser.add_argument(
@@ -97,6 +97,12 @@ def main():
         action="store_true",
         default=False,
         help="Disables sending an album description to RED. Useful to not overwrite what's already there."
+    )
+    parser.add_argument(
+        "--fixMD5",
+        action="store_true",
+        default=False,
+        help="Enable to fix unset MD5 signatures"
     )
     parser.add_argument(
         "-D", "--debug", action="store_true", help="debug mode", default=False
@@ -235,9 +241,12 @@ def main():
         logging.info("No missing tracks found.")
         logging.info("Checking for invalid characters in filenames...")
         # sanitize_filenames(path)
-        logging.info("Fixing any unset MD5 signatures...")
-        fixMD5(path)
-        logging.info("All flac files fixed")
+        if arg.fixMD5:
+            logging.info("Fixing any unset MD5 signatures...")
+            oldCwd = os.getcwd()
+            fixMD5(path)
+            os.chdir(oldCwd)
+            logging.info("All flac files fixed")
         logging.info("Generating track list...")
         create_track_list(path, runDir + "trackData.txt")
 
@@ -515,6 +524,9 @@ def get_album_type(folder_path):
     Returns:
     str: 'Album', 'EP', or 'Single'.
     """
+    if 'soundtrack' in folder_path.lower():
+        return 'Soundtrack'
+
     audio_files = []
     for filename in os.listdir(folder_path):
         if filename.endswith('.mp3') or filename.endswith('.flac'):

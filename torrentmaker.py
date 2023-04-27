@@ -285,9 +285,14 @@ def main():
         # remove any kinds of brackets from group name
         group = re.sub(r"[\[\]\(\)\{\}]", " ", group)
         group = group.split()[0]
+    else:
+        group = "NOGRP"
     if arg.tmdb is None and 'title' in str(guessItOutput):
         logging.info("No TMDB ID given. Attempting to find it automatically...")
-        title = guessItOutput['title']
+        if type(guessItOutput['title']) == list:
+            title = guessItOutput['title'][0]
+        else:
+            title = guessItOutput['title']
         if 'country' in guessItOutput:
             title = title + f" {guessItOutput['country'].alpha2}"
         # if 'year' in guessItOutput and guessItOutput['type'] == 'movie':
@@ -505,7 +510,8 @@ def main():
         else:
             width = mediaInfoText['media']['track'][1]['Width']
             height = mediaInfoText['media']['track'][1]['Height']
-            resolution = getResolution(width=width, height=height)
+            frameRate = mediaInfoText['media']['track'][1]['FrameRate']
+            resolution = getResolution(width=width, height=height, frameRate=frameRate)
         if "Interlaced" in str(mediaInfoText):
             resolution = resolution.replace("p", "i")
         logging.info("Resolution: " + resolution)
@@ -648,6 +654,8 @@ def main():
             type_id = 3
 
         match resolution:
+            case "4320p":
+                resolution_id = 1
             case "2160p":
                 resolution_id = 2
             case "1080p":
@@ -658,8 +666,14 @@ def main():
                 resolution_id = 5
             case "576p":
                 resolution_id = 6
+            case "576i":
+                resolution_id = 7
             case "480p":
                 resolution_id = 8
+            case "480i":
+                resolution_id = 9
+            case _:
+                resolution_id = 10
 
         # Get IMDB ID from TVDB API
         if arg.movie:
@@ -683,7 +697,7 @@ def main():
             else:
                 logging.info(f"Failed to find the IMDB ID from '{tmdbtoIMDDdata['imdb_id']}'. Please input just the numbers of the IMDB ID:")
             IMDB_ID = input()
-        with open(runDir + "showDesc.txt", "r") as descFile:
+        with open(runDir + "showDesc.txt", "r", encoding='utf-8') as descFile:
             description = descFile.read()
 
         # Get MediaInfo Dump
@@ -950,13 +964,17 @@ def get_audio_info(mediaInfo):
 
     # Channels
     channelsNum = mediaInfo['media']['track'][trackNum]['Channels']
-    channelsLayout = mediaInfo['media']['track'][trackNum]['ChannelLayout']
-    if "LFE" in channelsLayout:
-        channelsNum = str(int(channelsNum) - 1)
-        channelsNum2 = ".1"
-    else:
-        channelsNum2 = ".0"
-    channelsNum = channelsNum + channelsNum2
+    try:
+        channelsLayout = mediaInfo['media']['track'][trackNum]['ChannelLayout']
+        if "LFE" in channelsLayout:
+            channelsNum = str(int(channelsNum) - 1)
+            channelsNum2 = ".1"
+        else:
+            channelsNum2 = ".0"
+        channelsNum = channelsNum + channelsNum2
+    except KeyError:
+        logging.info("Couldn't find channel layout. Assuming no sub tracks.")
+        channelsNum = channelsNum + ".0"
     audioInfo = audioFormat + " " + channelsNum
     return audioInfo
 
@@ -984,11 +1002,14 @@ def downloadMediainfo():
     os.remove("MediaInfo_CLI_22.12_Windows_x64.zip")
 
 
-def getResolution(width, height):
+def getResolution(width, height, frameRate):
     width_to_height_dict = {"720": "576", "960": "540", "1280": "720", "1920": "1080", "4096": "2160", "3840": "2160", "692": "480", "1024": "576"}
     acceptedHeights = ['576', '480', '360', '240', '720', '1080', '1440', '2160']
     if width in width_to_height_dict:
         height = width_to_height_dict[width]
+        if height == "576" and "29" in frameRate:
+            logging.info("NTSC detected. Changed resolution to 480")
+            height = "480"
         return f"{str(height)}p"
 
     if height is not None and height in acceptedHeights:
