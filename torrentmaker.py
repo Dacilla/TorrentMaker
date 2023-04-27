@@ -1042,7 +1042,7 @@ def getUserInput(question: str):
     question = question + " [y, n]"
     Userinput = None
     while Userinput not in ["y", "yes", "n", "no"]:
-        notifyTaskbarIcon()
+        # notifyTaskbarIcon()
         Userinput = input(question)
         if Userinput in ["y", "yes"]:
             return True
