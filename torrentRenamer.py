@@ -205,18 +205,21 @@ def main():
         else:
             showName: str = tmdbData['name']
 
-        showName = showName.replace(":", " -")
+        showName = showName.replace(":", "")
 
         logging.info("Name: " + str(showName))
+        try:
+            if isMovie:
+                dateString = tmdbData['release_date']
+            else:
+                dateString = tmdbData['first_air_date']
 
-        if isMovie:
-            dateString = tmdbData['release_date']
-        else:
-            dateString = tmdbData['first_air_date']
-
-        date = datetime.strptime(dateString, "%Y-%m-%d")
-        year = str(date.year)
-        logging.info("Year: " + year)
+            date = datetime.strptime(dateString, "%Y-%m-%d")
+            year = str(date.year)
+            logging.info("Year: " + year)
+        except ValueError:
+            logging.warning("Year not found. Not including...")
+            year = ''
 
         if not isMovie:
             season = get_season(os.path.basename(path))
@@ -276,9 +279,9 @@ def main():
             episodeNum = episodeNum + ' ' + episodeTitle
 
         if isMovie:
-            postFileName = ('.'.join([showName, year, resolution, source, audio, videoCodec]).replace(' ', '.') + '-' + arg.group + '.' + container).replace('\'', '')
+            postFileName = ('.'.join([showName, year, resolution, source, audio, videoCodec]).replace(' ', '.') + '-' + arg.group + '.' + container).replace('\'', '').replace('..', '.')
         else:
-            postFileName = ('.'.join([showName, year, episodeNum, resolution, source, audio, videoCodec]).replace(' ', '.') + '-' + arg.group + '.' + container).replace('\'', '')
+            postFileName = ('.'.join([showName, year, episodeNum, resolution, source, audio, videoCodec]).replace(' ', '.') + '-' + arg.group + '.' + container).replace('\'', '').replace('..', '.')
 
         logging.info("Final file name:\n" + postFileName)
 

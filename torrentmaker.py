@@ -14,12 +14,15 @@ import zipfile
 import configparser
 import guessit
 import ctypes
+import colorsys
 
 from babel import Locale
 from pprint import pprint, pformat
 from base64 import b64encode
 from pymediainfo import MediaInfo
 from datetime import datetime
+from PIL import Image
+from colorthief import ColorThief
 
 from HUNOInfo import bannedEncoders, encoderGroups
 
@@ -307,6 +310,7 @@ def main():
 
     mediaInfoText = mediaInfoText.strip()
     mediaInfoText = json.loads(mediaInfoText)
+    mediaDescription = ""
     if tmdbID:
         if tmdb_api == "":
             logging.error("TMDB_API field not filled in settings.ini")
@@ -328,13 +332,11 @@ def main():
 
         # Get the JSON data from the response
         tmdbData = response.json()
-        originalLanguange = response.json()['original_language']
+        # originalLanguange = response.json()['original_language']
         logging.debug(pformat(tmdbData))
         # Print the description of the TV show
         logging.debug("description gotten: " + tmdbData['overview'])
-        with open(runDir + "showDesc.txt", "w", encoding='utf-8') as fb:
-            fb.write(tmdbData['overview'] + "\n\n")
-        logging.info("TMDB Description dumped to showDesc.txt")
+        mediaDescription = tmdbData['overview']
 
     logging.info("Making screenshots...")
     if not os.path.isdir(runDir + "screenshots"):
@@ -440,7 +442,7 @@ def main():
             except Exception as e:
                 logging.critical("Unexpected Exception: " + str(e))
                 continue
-        if arg.upload:
+        if arg.throttle:
             logging.info("Attempting to disable qbit upload speed limit")
             logging.info("Logging in to qbit...")
             try:
@@ -697,8 +699,7 @@ def main():
             else:
                 logging.info(f"Failed to find the IMDB ID from '{tmdbtoIMDDdata['imdb_id']}'. Please input just the numbers of the IMDB ID:")
             IMDB_ID = input()
-        with open(runDir + "showDesc.txt", "r", encoding='utf-8') as descFile:
-            description = descFile.read()
+        description = generate_bbcode(tmdbID, mediaDescription, runDir, tmdb_api)
 
         # Get MediaInfo Dump
         with open(runDir + "mediainfo.txt", "r", encoding='UTF-8') as infoFile:
@@ -773,6 +774,57 @@ def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torren
         logging.info("Torrent successfully injected.")
     else:
         logging.critical(result)
+
+
+def get_prominent_color(tmdb_id, api_key, directory):
+    logging.info(f"Fetching poster for TMDB ID: {tmdb_id}")
+
+    # Make a request to the TMDB API to get the poster URL
+    response = requests.get(f'https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}')
+    data = response.json()
+
+    # Get the poster path from the API response
+    poster_path = data['poster_path']
+    poster_url = f'https://image.tmdb.org/t/p/w500/{poster_path}'
+
+    logging.info(f"Downloading poster from URL: {poster_url}")
+
+    # Download and save the poster image
+    response = requests.get(poster_url, stream=True)
+    response.raise_for_status()
+    poster_path = os.path.join(directory, 'poster.jpg')
+    with open(poster_path, 'wb') as file:
+        for chunk in response.iter_content(chunk_size=8192):
+            file.write(chunk)
+
+    logging.info("Poster downloaded and saved successfully")
+    logging.info("Opening poster...")
+
+    color_thief = ColorThief(poster_path)
+    # get the dominant color
+    dominant_colour = color_thief.get_color(quality=1)
+    return dominant_colour
+
+
+def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, notes=None):
+    # average_color, prominent_color, prominent_color_hsv = get_prominent_color(tmdb_id, api_key, runDir)
+    prominent_color = get_prominent_color(tmdb_id, api_key, runDir)
+
+    bbcode = f'[color=#{prominent_color[0]:02x}{prominent_color[1]:02x}{prominent_color[2]:02x}][center][b]Description[/b][/center][/color]\n' \
+             f'[center][quote]{mediaDesc}[/quote][/center]\n\n'
+    if notes:
+        bbcode += f'[color=#{prominent_color[0]:02x}{prominent_color[1]:02x}{prominent_color[2]:02x}][center][b]Notes[/b][/center][/color]\n' \
+                  f'[center]{notes}[/center]\n\n'
+    bbcode += f'[color=#{prominent_color[0]:02x}{prominent_color[1]:02x}{prominent_color[2]:02x}][center][b]Screens[/b][/center][/color]\n'
+    with open(runDir + "showDesc.txt") as f:
+        bbcode += f.read()
+
+    with open(runDir + "showDesc.txt", 'w', encoding='utf-8') as fi:
+        fi.write(bbcode)
+
+    logging.info("Final bbcode written to " + runDir + "showDesc.txt")
+
+    return bbcode
 
 
 def convert_sha1_hash(hash_str):
@@ -902,6 +954,8 @@ def get_colour_space(mediaInfo):
     try:
         if "Dolby Vision" in mediaInfo['media']['track'][1]['HDR_Format']:
             if "HDR10" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
+                if "HDR10+" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
+                    return "DV HDR10+"
                 return "DV HDR"
             else:
                 return "DV"
@@ -909,6 +963,8 @@ def get_colour_space(mediaInfo):
         logging.debug("Keyerror when looking for DV format")
         if mediaInfo['media']['track'][1]['colour_primaries'] in ['BT.2020', 'DCI-P3'] or mediaInfo['media']['track'][1]['transfer_characteristics'] in ['PQ', 'HLG']:
             return "HDR"
+    if "HDR10+" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
+        return "HDR10+"
     return "HDR"
 
 
