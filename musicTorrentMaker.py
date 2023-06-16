@@ -2,6 +2,7 @@ import argparse
 import os
 import logging
 import sys
+from time import sleep
 import requests
 import torf
 import qbittorrentapi
@@ -22,6 +23,10 @@ from mutagen.flac import FLAC
 from mutagen.easyid3 import EasyID3
 import musicbrainzngs as mb
 from urllib.parse import unquote
+from ftplib import FTP_TLS
+from tqdm import tqdm
+from concurrent import futures
+
 
 # Script to automate uploading music to RED
 
@@ -79,6 +84,12 @@ def main():
         help="Enable to automatically inject torrent file to qbittorrent"
     )
     parser.add_argument(
+        "--sbcopy",
+        action="store_true",
+        default=False,
+        help="Enable to automatically copy given folder to seedbox if given in settings"
+    )
+    parser.add_argument(
         "-u",
         "--upload",
         action="store_true",
@@ -103,6 +114,12 @@ def main():
         action="store_true",
         default=False,
         help="Enable to fix unset MD5 signatures"
+    )
+    parser.add_argument(
+        "--skipPrompts",
+        action="store_true",
+        default=False,
+        help="Enable to skip all user prompts. It won't try to match to musicbrainz, and it'll upload immediately"
     )
     parser.add_argument(
         "-D", "--debug", action="store_true", help="debug mode", default=False
@@ -131,7 +148,14 @@ def main():
             'QBIT_HOST': '',
             'PTPIMG_API': '',
             'RED_URL': '',
-            'RED_API': ''
+            'RED_API': '',
+            'SEEDBOX_HOST': '',
+            'SEEDBOX_PORT': '',
+            'SEEDBOX_FTP_USER': '',
+            'SEEDBOX_FTP_PASSWORD': '',
+            'SEEDBOX_QBIT_HOST': '',
+            'SEEDBOX_QBIT_PASSWORD': '',
+            'SEEDBOX_QBIT_USER': '',
         }
 
         with open('settings.ini', 'w') as configfile:
@@ -169,6 +193,13 @@ def main():
     ptpimg_api = config['DEFAULT']['PTPIMG_API']
     red_url = config['DEFAULT']['RED_URL']
     red_api = config['DEFAULT']['RED_API']
+    seedbox_host = config['DEFAULT']['SEEDBOX_HOST']
+    seedbox_port = int(config['DEFAULT']['SEEDBOX_PORT'])
+    seedbox_qbit_host = config['DEFAULT']['SEEDBOX_QBIT_HOST']
+    seedbox_qbit_user = config['DEFAULT']['SEEDBOX_QBIT_USER']
+    seedbox_qbit_password = config['DEFAULT']['SEEDBOX_QBIT_PASSWORD']
+    seedbox_ftp_user = config['DEFAULT']['SEEDBOX_FTP_USER']
+    seedbox_ftp_password = config['DEFAULT']['SEEDBOX_FTP_PASSWORD']
     if ptpimg_api == '':
         ptpimg_api = None
 
@@ -179,34 +210,49 @@ def main():
     lastAlbumTitle = None
 
     for path in pathList:
-        artist = get_first_song_artist(path)
-        album = get_first_song_album(path)
+        if not check_file_path_length(path):
+            logging.info("A file path is too long in path: " + path)
+            if arg.skipPrompts:
+                logging.info("Skipping...")
+            else:
+                sys.exit()
+        discsArr = []
+        if os.path.exists(os.path.join(path, 'Disc 1')):
+            discsArr = find_disc_folders(path)
+            artist = get_first_song_artist(os.path.join(path, 'Disc 1'))
+            album = get_first_song_album(os.path.join(path, 'Disc 1'))
+        else:
+            artist = get_first_song_artist(path)
+            album = get_first_song_album(path)
         logging.info("Gotten artist: " + artist)
         logging.info("Gotten album: " + album)
-        logging.info("Finding artist info...")
-        musicBrainzAlbumInfo = find_album_match(artist, album)
-        if musicBrainzAlbumInfo:
-            similarityPercent = similarity(musicBrainzAlbumInfo['release-group']['title'], album)
-            logging.info("Similarity between album names: " + str(similarityPercent))
-            input = True
-            if similarityPercent < 90:
-                input = getUserInput(f"The two found albums aren't similar enough. Are these equal?\n'{musicBrainzAlbumInfo['release-group']['title']}', '{album}'")
-            if input or musicBrainzAlbumInfo['release-group']['title'] == album:
-                releaseGroupID = musicBrainzAlbumInfo['release-group']['id']
+        releaseForm = None
+        releaseGroupID = None
+        if lastAlbumTitle != album or not arg.skipPrompts:
+            logging.info("Finding artist info...")
+            musicBrainzAlbumInfo = find_album_match(artist, album)
+            if musicBrainzAlbumInfo:
+                similarityPercent = similarity(musicBrainzAlbumInfo['release-group']['title'], album)
+                logging.info("Similarity between album names: " + str(similarityPercent))
+                input = False
+                if similarityPercent < 90 and not arg.skipPrompts:
+                    input = getUserInput(f"The two found albums aren't similar enough. Are these equal?\n'{musicBrainzAlbumInfo['release-group']['title']}', '{album}'")
+                if input or musicBrainzAlbumInfo['release-group']['title'] == album:
+                    releaseGroupID = musicBrainzAlbumInfo['release-group']['id']
+                else:
+                    releaseGroupID = None
             else:
                 releaseGroupID = None
-        else:
-            releaseGroupID = None
-            input = None
+                input = None
 
-        releaseForm = None
-        if input:
-            if 'type' in musicBrainzAlbumInfo['release-group']:
-                releaseForm = musicBrainzAlbumInfo['release-group']['type']
-                if musicBrainzAlbumInfo['release-group'] == 'Other':
-                    releaseForm = musicBrainzAlbumInfo['release-group']['secondary-type-list'][0]
-            elif 'primary-type' in musicBrainzAlbumInfo['release-group']:
-                releaseForm = musicBrainzAlbumInfo['release-group']['primary-type']
+            releaseForm = None
+            if input:
+                if 'type' in musicBrainzAlbumInfo['release-group']:
+                    releaseForm = musicBrainzAlbumInfo['release-group']['type']
+                    if musicBrainzAlbumInfo['release-group'] == 'Other':
+                        releaseForm = musicBrainzAlbumInfo['release-group']['secondary-type-list'][0]
+                elif 'primary-type' in musicBrainzAlbumInfo['release-group']:
+                    releaseForm = musicBrainzAlbumInfo['release-group']['primary-type']
         if not os.path.isdir("runs"):
             os.mkdir("runs")
             os.mkdir(f"runs{os.sep}001")
@@ -223,7 +269,13 @@ def main():
             #     logging.info("Found directory does not have finished .torrent file. Directory Deleted.")
             maxValue = maxValue + 1
             maxValue = str(maxValue).zfill(3)
-            os.mkdir("runs" + os.sep + maxValue)
+            while True:
+                try:
+                    os.mkdir("runs" + os.sep + maxValue)
+                    break
+                except FileExistsError:
+                    logging.error("Folder exists. Adding one and trying again...")
+                    maxValue = str(int(maxValue) + 1)
             runDir = os.getcwd() + os.sep + "runs" + os.sep + maxValue + os.sep
 
         logging.info("Run directory: " + runDir)
@@ -231,7 +283,11 @@ def main():
 
         if arg.format:
             logging.info("Formatting mode enabled...")
-            add_track_position(path)
+            if len(discsArr) > 0:
+                for discPath in discsArr:
+                    add_track_position(discPath)
+            else:
+                add_track_position(path)
 
         logging.info("Checking for missing tracks...")
         missingTracksList = check_missing_tracks(path)
@@ -243,12 +299,22 @@ def main():
         # sanitize_filenames(path)
         if arg.fixMD5:
             logging.info("Fixing any unset MD5 signatures...")
-            oldCwd = os.getcwd()
-            fixMD5(path)
-            os.chdir(oldCwd)
-            logging.info("All flac files fixed")
+            if len(discsArr) > 0:
+                for discPath in discsArr:
+                    oldCwd = os.getcwd()
+                    fixMD5(discPath)
+                    os.chdir(oldCwd)
+                    logging.info("All flac files fixed")
+            else:
+                oldCwd = os.getcwd()
+                fixMD5(path)
+                os.chdir(oldCwd)
+                logging.info("All flac files fixed")
         logging.info("Generating track list...")
-        create_track_list(path, runDir + "trackData.txt")
+        if len(discsArr) > 0:
+            create_track_list(discsArr, runDir + "trackData.txt")
+        else:
+            create_track_list(path, runDir + "trackData.txt")
 
         logging.info("Creating torrent file")
         torrent = torf.Torrent()
@@ -289,30 +355,51 @@ def main():
 
         if red_api and arg.upload:
             logging.info("Attempting to upload to RED...")
-            print_all_metadata_path(path)
+            if len(discsArr) > 0:
+                for discPath in discsArr:
+                    print_all_metadata_path(discPath)
+            else:
+                print_all_metadata_path(path)
             if releaseForm is None:
-                releaseType = get_album_type(path)
+                if len(discsArr) > 0:
+                    releaseType = get_album_type(discsArr)
+                else:
+                    releaseType = get_album_type(path)
             else:
                 releaseType = releaseForm
             logging.info("Release type: " + releaseType)
-            audioFormat = detect_audio_format(path)
-            logging.info("Audio format: " + audioFormat)
-            bitrate = get_bitrate_or_lossless(path)
+            if len(discsArr) > 0:
+                audioFormat = detect_audio_format(discsArr[0])
+                logging.info("Audio format: " + audioFormat)
+                bitrate = get_bitrate_or_lossless(discsArr[0])
+            else:
+                audioFormat = detect_audio_format(path)
+                logging.info("Audio format: " + audioFormat)
+                bitrate = get_bitrate_or_lossless(path)
             if bitrate == "Other":
                 logging.error("No bitrate found. Passing to next album")
                 continue
             logging.info("Bitrate: " + bitrate)
-            genre = get_genre(path)
+            if len(discsArr) > 0:
+                genre = get_genre(discsArr[0])
+            else:
+                genre = get_genre(path)
             logging.info("Genre: " + str(genre))
             original_release_year = None
             if arg.ogyear:
                 original_release_year = arg.ogyear
                 logging.info("Original release year: " + str(original_release_year))
 
-            release_year = get_release_year(path)
+            if len(discsArr) > 0:
+                release_year = get_release_year(discsArr[0])
+            else:
+                release_year = get_release_year(path)
             logging.info("Release year: " + str(release_year))
             recordLabel = None
-            recordLabel = extract_label(path)
+            if len(discsArr) > 0:
+                recordLabel = extract_label(discsArr[0])
+            else:
+                recordLabel = extract_label(path)
             if recordLabel:
                 logging.info("Record Label: " + recordLabel)
             groupId = None
@@ -327,6 +414,10 @@ def main():
                 groupId = arg.groupid
                 logging.info("RED Group ID: " + str(groupId))
             lastAlbumTitle = album
+            if arg.sbcopy and seedbox_port and seedbox_host and seedbox_ftp_password and seedbox_ftp_user:
+                logging.info("Seedbox copy enabled")
+                ftp_copy_folder(path, seedbox_host, seedbox_port, seedbox_ftp_user, seedbox_ftp_password)
+
             response = upload_music_data(runDir=runDir,
                                          torrent_file=runDir + torrentFileName,
                                          artists=artist,
@@ -343,7 +434,8 @@ def main():
                                          api=red_api,
                                          releaseGroup=releaseGroupID,
                                          redGroupId=groupId,
-                                         noDesc=noDesc)
+                                         noDesc=noDesc,
+                                         skipPrompts=arg.skipPrompts)
             if response is None:
                 continue
             pprint(response.json())
@@ -356,7 +448,9 @@ def main():
                     if arg.inject:
                         logging.info("Injecting to qbit...")
                         paused = False
-                        qbitInject(qbit_host=qbit_host, qbit_username=qbit_username, qbit_password=qbit_password, runDir=runDir, torrentFileName=os.path.basename(downloadedTorrent), paused=paused, postName=postName, category="Redacted")
+                        if arg.sbcopy:
+                            qbitInject(qbit_host=seedbox_qbit_host, qbit_username=seedbox_qbit_user, qbit_password=seedbox_qbit_password, runDir=runDir, torrentFileName=os.path.basename(downloadedTorrent), paused=paused, postName=postName, category="Redacted", seedTimeLimit=-1)
+                        qbitInject(qbit_host=qbit_host, qbit_username=qbit_username, qbit_password=qbit_password, runDir=runDir, torrentFileName=os.path.basename(downloadedTorrent), paused=paused, postName=postName, category="Redacted", seedTimeLimit=-1)
                     logging.info("Copying torrent to ubuntu VM...")
                     # Destination directory path
                     dst_dir_path = r'U:\home\alex\redcurry\torrent-files'
@@ -383,6 +477,24 @@ def fixMD5(folder_path):
     for line in process.stdout:
         print(line, end='')
 
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            if '.tmp' in file:
+                file_path = os.path.join(root, file)
+                os.remove(file_path)
+                logging.info(f"Deleted file: {file_path}")
+
+
+def find_disc_folders(folder_path):
+    disc_folders = []
+
+    for root, dirs, files in os.walk(folder_path):
+        for dir_name in dirs:
+            if dir_name.startswith('Disc'):
+                disc_folders.append(os.path.join(root, dir_name))
+
+    return disc_folders
+
 
 def extract_label(path):
     label = None
@@ -406,6 +518,15 @@ def extract_label(path):
             continue  # Skip files that are not MP3 or FLAC
     if copyright_string:
         label = process_string(copyright_string)
+
+    # Split the string based on 'Under Exclusive License'
+    if label is not None:
+        parts = label.lower().split('under exclusive')
+
+        # Return the portion of the string before the occurrence
+        if len(parts) > 0:
+            label = parts[0].strip()
+
     return label
 
 
@@ -519,18 +640,24 @@ def get_album_type(folder_path):
     """Determine if a folder of audio files is an album, EP, or single.
 
     Parameters:
-    folder_path (str): Path to the folder containing audio files.
+    folder_path (str or list): Path to the folder(s) containing audio files, or an array of folder paths.
 
     Returns:
     str: 'Album', 'EP', or 'Single'.
     """
-    if 'soundtrack' in folder_path.lower():
-        return 'Soundtrack'
-
-    audio_files = []
-    for filename in os.listdir(folder_path):
-        if filename.endswith('.mp3') or filename.endswith('.flac'):
-            audio_files.append(os.path.join(folder_path, filename))
+    if isinstance(folder_path, list):
+        # If folder_path is an array, consider all the songs in all the given paths
+        audio_files = []
+        for path in folder_path:
+            for filename in os.listdir(path):
+                if filename.endswith('.mp3') or filename.endswith('.flac'):
+                    audio_files.append(os.path.join(path, filename))
+    else:
+        # If folder_path is a single folder path, consider the songs in that path only
+        audio_files = []
+        for filename in os.listdir(folder_path):
+            if filename.endswith('.mp3') or filename.endswith('.flac'):
+                audio_files.append(os.path.join(folder_path, filename))
 
     if not audio_files:
         raise ValueError(f"No audio files found in {folder_path}")
@@ -539,9 +666,9 @@ def get_album_type(folder_path):
     for audio_file in audio_files:
         try:
             if audio_file.endswith(".mp3"):
-                audio = EasyID3(os.path.join(folder_path, audio_file))
+                audio = EasyID3(audio_file)
             elif audio_file.endswith(".flac"):
-                audio = FLAC(os.path.join(folder_path, audio_file))
+                audio = FLAC(audio_file)
             track_numbers.add(audio.get("tracknumber", [])[0])
         except Exception:
             pass
@@ -552,8 +679,8 @@ def get_album_type(folder_path):
     newTrackNums = []
     for num, track in enumerate(track_numbers):
         if '/' in track:
-            track: str
-            newTrackNums.append(track.split('/')[0])
+            track = track.split('/')[0]
+        newTrackNums.append(track)
 
     if len(track_numbers) < 3:
         return "Single"
@@ -596,7 +723,16 @@ def get_bitrate_or_lossless(path):
     return None
 
 
-def upload_music_data(runDir, releaseGroup, torrent_file, artists: str, title, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, redGroupId=None, ogyear=None, noDesc=False):
+def check_file_path_length(folder_path):
+    for root, dirs, files in os.walk(folder_path):
+        for file_name in files:
+            path_length = len(os.path.basename(root)) + len(file_name)
+            if path_length > 180:
+                return False
+    return True
+
+
+def upload_music_data(runDir, releaseGroup, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, redGroupId=None, ogyear=None, noDesc=False, skipPrompts=False):
     url = "https://redacted.ch/ajax.php?action=upload"
 
     albumDesc = open(runDir + "trackData.txt", 'r', encoding='UTF-8').read()
@@ -605,6 +741,9 @@ def upload_music_data(runDir, releaseGroup, torrent_file, artists: str, title, y
         musicBrainzURL = "https://musicbrainz.org/release-group/" + releaseGroup
 
         albumDesc = albumDesc + "\n\n\n" + f"[url={musicBrainzURL}]MusicBrainz Release Group[/url]"
+
+    if 'remix' in title.lower():
+        releasetype = 'Remix'
 
     release_types = {
         'Album': 1,
@@ -626,7 +765,11 @@ def upload_music_data(runDir, releaseGroup, torrent_file, artists: str, title, y
 
     releasetype = release_types.get(releasetype, None)
 
-    tags = format_genres(tags)
+    tags: str = format_genres(tags)
+    if len(tags) > 0:
+        tags += ", " + str(year)[:3] + '0s'
+    else:
+        tags = str(year)[:3] + '0s'
     logging.info("Tags: " + tags)
     artists = artists.split(', ')
     print(artists)
@@ -667,9 +810,13 @@ def upload_music_data(runDir, releaseGroup, torrent_file, artists: str, title, y
     if recordLabel:
         if len(recordLabel) < 2 or len(recordLabel) > 80:
             recordLabel = input("Gotten record label too long or too short for RED\nGotten label: " + recordLabel + "\nPlease input a record label:\n")
-        if 'Records DK' in recordLabel:
+        if 'records dk' in recordLabel.lower():
             logging.info("Distro Kid release detected. Setting to Self-Released")
             recordLabel = 'Self-Released'
+        if artists[0].lower() == recordLabel.lower():
+            logging.info("Self release detected. Setting to Self-Released")
+            recordLabel = 'Self-Released'
+
         data['remaster_record_label'] = recordLabel
 
     if len(artists) == 1:
@@ -684,7 +831,7 @@ def upload_music_data(runDir, releaseGroup, torrent_file, artists: str, title, y
     torrent_file = {'file_input': open(torrent_file, 'rb')}
 
     pprint(data)
-    if getUserInput("Do you want to upload this to RED?"):
+    if skipPrompts or getUserInput("Do you want to upload this to RED?"):
         response = requests.post(headers=headers, url=url, data=data, files=torrent_file)
         return response
     else:
@@ -818,56 +965,60 @@ def get_first_song_artist(folder_path):
 
 def find_album_match(artist_name, album_name):
     # Search for the artist on MusicBrainz
-    search_results = mb.search_artists(artist_name)
+    try:
+        search_results = mb.search_artists(artist_name)
 
-    # Check if any results were found
-    if len(search_results["artist-list"]) == 0:
-        print("No results found for artist:", artist_name)
+        # Check if any results were found
+        if len(search_results["artist-list"]) == 0:
+            print("No results found for artist:", artist_name)
+            return None
+
+        # Get the ID of the best match artist
+        foundArtistName = None
+        for result in search_results["artist-list"]:
+            resultArtistName = mb.get_artist_by_id(result['id'])
+            if similarity(resultArtistName['artist']['name'], artist_name) > 95:
+                logging.info("Artist name match found: " + resultArtistName['artist']['name'])
+                foundArtistName = resultArtistName['artist']['name']
+                break
+
+        if not foundArtistName:
+            logging.info("No sufficient artist name found.")
+            return None
+
+        artist_id = resultArtistName['artist']['id']
+        print("Best match artist ID:", artist_id)
+
+        # Search for the album by the artist on MusicBrainz
+        album_results = mb.search_releases(artist=resultArtistName['artist']['name'], release=album_name)
+
+        # Check if any results were found
+        if len(album_results["release-list"]) == 0:
+            print("No results found for album:", album_name)
+            return None
+
+        # Get the ID of the best match album
+        best_match = None
+        for result in album_results['release-list']:
+            if resultArtistName['artist']['name'] in str(result):
+                best_match = result
+        if not best_match:
+            logging.info("No album with correct artist found.")
+            return None
+
+        album_id = best_match["id"]
+        print("Best match album ID:", album_id)
+
+        # Get the release group ID from the album information
+        release_group_id = best_match["release-group"]["id"]
+        print("Release group ID:", release_group_id)
+
+        # Get the full release group information from MusicBrainz
+        release_group_info = mb.get_release_group_by_id(release_group_id)
+        pprint(release_group_info)
+    except Exception:
+        logging.error("Error hit. SKipping matching...")
         return None
-
-    # Get the ID of the best match artist
-    foundArtistName = None
-    for result in search_results["artist-list"]:
-        resultArtistName = mb.get_artist_by_id(result['id'])
-        if similarity(resultArtistName['artist']['name'], artist_name) > 95:
-            logging.info("Artist name match found: " + resultArtistName['artist']['name'])
-            foundArtistName = resultArtistName['artist']['name']
-            break
-
-    if not foundArtistName:
-        logging.info("No sufficient artist name found.")
-        return None
-
-    artist_id = resultArtistName['artist']['id']
-    print("Best match artist ID:", artist_id)
-
-    # Search for the album by the artist on MusicBrainz
-    album_results = mb.search_releases(artist=resultArtistName['artist']['name'], release=album_name)
-
-    # Check if any results were found
-    if len(album_results["release-list"]) == 0:
-        print("No results found for album:", album_name)
-        return None
-
-    # Get the ID of the best match album
-    best_match = None
-    for result in album_results['release-list']:
-        if resultArtistName['artist']['name'] in str(result):
-            best_match = result
-    if not best_match:
-        logging.info("No album with correct artist found.")
-        return None
-
-    album_id = best_match["id"]
-    print("Best match album ID:", album_id)
-
-    # Get the release group ID from the album information
-    release_group_id = best_match["release-group"]["id"]
-    print("Release group ID:", release_group_id)
-
-    # Get the full release group information from MusicBrainz
-    release_group_info = mb.get_release_group_by_id(release_group_id)
-    pprint(release_group_info)
 
     return release_group_info
 
@@ -938,56 +1089,214 @@ def add_track_position(folder_path):
 
 def create_track_list(folder_path, output_file):
     """
-    This function takes a folder path and an output file name as input, and creates a formatted list of every track
-    found in the folder along with its position and length, and writes the list to the output file.
+    This function takes a folder path (or an array of folder paths) and an output file name as input, and creates a
+    formatted list of every track found in the folders along with its position and length, and writes the list to the
+    output file.
     """
-    # Get a list of all the files in the folder
-    files = os.listdir(folder_path)
+    # Check if folder_path is an array
+    if isinstance(folder_path, list):
+        # Initialize an empty list to store all the track information
+        track_list = []
 
-    # Filter for only music files (you can customize this depending on the file extensions you want to look for)
-    music_files = [f for f in files if f.endswith('.mp3') or f.endswith('.wav') or f.endswith('.flac')]
+        # Loop over each folder path in the array
+        for path in folder_path:
+            # Get the disc number from the folder path
+            disc_number = os.path.basename(path).split(" ")[-1]
 
-    # Sort the music files alphabetically
-    music_files.sort()
+            # Get a list of all the files in the folder
+            files = os.listdir(path)
 
-    # Initialize an empty list to store the track information
-    track_list = []
+            # Filter for only music files (you can customize this depending on the file extensions you want to look for)
+            music_files = [f for f in files if f.endswith('.mp3') or f.endswith('.wav') or f.endswith('.flac')]
 
-    # Loop over the music files and extract the track information
-    for i, file_name in enumerate(music_files):
-        # Get the track position
-        track_position = str(i + 1).zfill(2)
+            # Sort the music files alphabetically
+            music_files.sort()
 
-        # Get the track length in seconds
-        if file_name.endswith('.mp3'):
-            # For MP3 files, use Mutagen to extract the track length
-            audio = MP3(os.path.join(folder_path, file_name))
-            track_length = int(audio.info.length)
-            title = audio.get('TIT2', [file_name])[0]
-        elif file_name.endswith('.flac'):
-            # For FLAC files, use Mutagen to extract the track length from the STREAMINFO block
-            audio = FLAC(os.path.join(folder_path, file_name))
-            track_length = int(audio.info.length)
-            title = audio.get('title', [file_name])[0]
-        else:
-            # For other file types, use os.path.getsize() to get the file size in bytes and estimate the length
-            file_size = os.path.getsize(os.path.join(folder_path, file_name))
-            track_length = int(file_size / 1000000) * 4  # 4 seconds per MB, this is just an estimate
-            title = file_name
+            track_list.append(f"Disk {disc_number}:")
 
-        # Convert the track length from seconds to a formatted string (XX:XX)
-        minutes = str(track_length // 60).zfill(2)
-        seconds = str(track_length % 60).zfill(2)
-        track_length_str = f"{minutes}:{seconds}"
+            # Loop over the music files and extract the track information
+            for i, file_name in enumerate(music_files):
+                # Get the track position
+                track_position = str(i + 1).zfill(2)
 
-        # Add the track information to the track_list
-        track_list.append(f"{track_position}. {title} ({track_length_str})")
+                # Get the track length in seconds
+                if file_name.endswith('.mp3'):
+                    # For MP3 files, use Mutagen to extract the track length
+                    audio = MP3(os.path.join(path, file_name))
+                    track_length = int(audio.info.length)
+                    title = audio.get('TIT2', [file_name])[0]
+                elif file_name.endswith('.flac'):
+                    # For FLAC files, use Mutagen to extract the track length from the STREAMINFO block
+                    audio = FLAC(os.path.join(path, file_name))
+                    track_length = int(audio.info.length)
+                    title = audio.get('title', [file_name])[0]
+                else:
+                    # For other file types, use os.path.getsize() to get the file size in bytes and estimate the length
+                    file_size = os.path.getsize(os.path.join(path, file_name))
+                    track_length = int(file_size / 1000000) * 4  # 4 seconds per MB, this is just an estimate
+                    title = file_name
+
+                # Convert the track length from seconds to a formatted string (XX:XX)
+                minutes = str(track_length // 60).zfill(2)
+                seconds = str(track_length % 60).zfill(2)
+                track_length_str = f"{minutes}:{seconds}"
+
+                # Add the track information to the track_list, including the disc number
+                track_list.append(f"\n\t{track_position}. {title} ({track_length_str})")
+
+    else:
+        # Get a list of all the files in the folder
+        files = os.listdir(folder_path)
+
+        # Filter for only music files (you can customize this depending on the file extensions you want to look for)
+        music_files = [f for f in files if f.endswith('.mp3') or f.endswith('.wav') or f.endswith('.flac')]
+
+        # Sort the music files alphabetically
+        music_files.sort()
+
+        # Initialize an empty list to store the track information
+        track_list = []
+
+        # Loop over the music files and extract the track information
+        for i, file_name in enumerate(music_files):
+            # Get the track position
+            track_position = str(i + 1).zfill(2)
+
+            # Get the track length in seconds
+            if file_name.endswith('.mp3'):
+                # For MP3 files, use Mutagen to extract the track length
+                audio = MP3(os.path.join(folder_path, file_name))
+                track_length = int(audio.info.length)
+                title = audio.get('TIT2', [file_name])[0]
+            elif file_name.endswith('.flac'):
+                # For FLAC files, use Mutagen to extract the track length from the STREAMINFO block
+                audio = FLAC(os.path.join(folder_path, file_name))
+                track_length = int(audio.info.length)
+                title = audio.get('title', [file_name])[0]
+            else:
+                # For other file types, use os.path.getsize() to get the file size in bytes and estimate the length
+                file_size = os.path.getsize(os.path.join(folder_path, file_name))
+                track_length = int(file_size / 1000000) * 4  # 4 seconds per MB, this is just an estimate
+                title = file_name
+
+            # Convert the track length from seconds to a formatted string (XX:XX)
+            minutes = str(track_length // 60).zfill(2)
+            seconds = str(track_length % 60).zfill(2)
+            track_length_str = f"{minutes}:{seconds}"
+
+            # Add the track information to the track_list
+            track_list.append(f"{track_position}. {title} ({track_length_str})")
 
     # Write the track_list to the output file
     with open(output_file, 'w', encoding='UTF-8') as f:
         f.write('\n'.join(track_list))
 
     logging.info(f"Track list written to {output_file} successfully!")
+
+
+def ftp_copy_folder(local_folder_path, host, port, username, password):
+    remote_folder_path = '/downloads/qbittorrent'  # Destination folder on the remote host
+
+    logging.info("Local path: " + local_folder_path)
+    logging.info("Host: " + host)
+    logging.info("Port: " + str(port))
+    logging.info("Username: " + username)
+    logging.info("Password: " + password)
+
+    ftp = FTP_TLS()
+    ftp.connect(host, port)
+    ftp.login(username, password)
+    ftp.prot_p()
+    ftp.cwd(remote_folder_path)
+
+    logging.info("Creating directory: " + os.path.basename(local_folder_path))
+    try:
+        ftp.mkd(os.path.basename(local_folder_path))
+    except Exception:
+        # TODO: Add a check if the folder already exists
+        logging.error("Failed to make directory, it probably already exists")
+
+    destination_path = remote_folder_path + '/' + os.path.basename(local_folder_path)
+
+    for root, dirs, files in os.walk(local_folder_path):
+        # Create corresponding directories in the destination path
+        relative_path = os.path.relpath(root, local_folder_path)
+        if relative_path != '.':
+            destination_dir = destination_path + '/' + relative_path
+            logging.info("Creating sub directory: " + destination_dir)
+            ftp.mkd(destination_dir)  # Create directory on FTP server
+        else:
+            destination_dir = destination_path
+            print(destination_dir)
+
+        # Copy files to their corresponding locations
+        for file in files:
+            source_file = os.path.join(root, file)
+            destination_file = destination_dir + '/' + file
+            logging.info("Uploading: " + source_file)
+            with open(source_file, 'rb') as f:
+                ftp.storbinary('STOR ' + destination_file, f)  # Upload file to FTP server
+            logging.info("Uploaded to: " + destination_file)
+
+
+def ftp_copy_folder_original(local_folder_path, host, port, username, password):
+    remote_folder_path = '/downloads/qbittorrent'  # Destination folder on the remote host
+
+    logging.info("Local path: " + local_folder_path)
+    logging.info("Host: " + host)
+    logging.info("Port: " + str(port))
+    logging.info("Username: " + username)
+    logging.info("Password: " + password)
+
+    # Connect to the FTP server
+    ftp = FTP_TLS()
+    ftp.connect(host, port)
+    ftp.login(username, password)
+    ftp.prot_p()
+    ftp.retrlines('LIST')
+    logging.info(ftp.pwd())
+    # Create the remote folder if it doesn't exist
+    remote_dir = os.path.join(remote_folder_path)
+    ftp.cwd(remote_dir)
+    logging.info("Creating directory: " + os.path.basename(local_folder_path))
+    try:
+        ftp.mkd(os.path.basename(local_folder_path))
+    except Exception:
+        # TODO: Add a check if the folder already exists
+        logging.error("Failed to make directory, it probably already exists")
+    remote_dir = remote_folder_path + '/' + os.path.basename(local_folder_path)
+
+    # for os.path.
+
+    for root, dirs, files in os.walk(local_folder_path):
+        relative_path = os.path.relpath(root, local_folder_path)
+        remote_dir = os.path.join(remote_folder_path, relative_path)
+
+        # Create remote directories if they don't exist
+        try:
+            ftp.mkd(remote_dir)
+        except:
+            pass
+
+        # Change remote working directory
+        ftp.cwd(remote_dir)
+
+        # Upload files
+        for file in files:
+            local_file_path = os.path.join(root, file)
+            with open(local_file_path, 'rb') as local_file:
+                ftp.storbinary(f'STOR {file}', local_file)
+                print("\n")
+                logging.info(f"Uploaded file: {file}")
+
+    # Disconnect from the FTP server
+    ftp.quit()
+    logging.info("Folder copied successfully!")
+
+
+def upload_file(ftp, local_file_path, remote_file_name):
+    with open(local_file_path, 'rb') as local_file:
+        ftp.storbinary(f'STOR {remote_file_name}', local_file)
 
 
 if __name__ == "__main__":

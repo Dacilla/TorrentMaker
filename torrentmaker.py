@@ -78,6 +78,13 @@ def main():
         default=None
     )
     parser.add_argument(
+        "-n", "--notes",
+        action="store",
+        type=str,
+        help="Add any release notes",
+        default=None
+    )
+    parser.add_argument(
         "--hash",
         action="store",
         type=str,
@@ -117,7 +124,13 @@ def main():
         "--huno",
         action="store_true",
         default=False,
-        help="Enable to upload torrent to HUNO, using api key found in hunoAPI.txt"
+        help="Enable to upload torrent to HUNO, using api key found in settings.ini"
+    )
+    parser.add_argument(
+        "--aither",
+        action="store_true",
+        default=False,
+        help="Enable to upload torrent to Aither, using api key found in settings.ini"
     )
     parser.add_argument(
         "--throttle",
@@ -255,7 +268,13 @@ def main():
         #     logging.info("Found directory does not have finished .torrent file. Directory Deleted.")
         maxValue = maxValue + 1
         maxValue = str(maxValue).zfill(3)
-        os.mkdir("runs" + os.sep + maxValue)
+        while True:
+            try:
+                os.mkdir("runs" + os.sep + maxValue)
+                break
+            except FileExistsError:
+                logging.error("Folder exists. Adding one and trying again...")
+                maxValue = str(int(maxValue) + 1)
         runDir = os.getcwd() + os.sep + "runs" + os.sep + maxValue + os.sep
 
     logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
@@ -524,7 +543,7 @@ def main():
         if 'HEVC' in mediaInfoText['media']['track'][1]['Format']:
             if 'remux' in file.lower().replace('.', ''):
                 videoCodec = 'HEVC'
-            elif 'h265' in file.lower().replace('.', '') or 'hevc' in file.lower().replace('.', ''):
+            elif 'h265' in file.lower().replace('.', '') or ('hevc' in file.lower().replace('.', '') and 'x265' not in file.lower().replace('.', '') and 'BluRay' not in arg.source):
                 videoCodec = 'H265'
             else:
                 videoCodec = "x265"
@@ -699,7 +718,13 @@ def main():
             else:
                 logging.info(f"Failed to find the IMDB ID from '{tmdbtoIMDDdata['imdb_id']}'. Please input just the numbers of the IMDB ID:")
             IMDB_ID = input()
-        description = generate_bbcode(tmdbID, mediaDescription, runDir, tmdb_api)
+        notes = arg.notes
+        if os.path.isdir(os.path.join(path, "Featurettes")):
+            if notes is not None:
+                notes += "\nIncludes featurettes"
+            else:
+                notes = "Includes featurettes"
+        description = generate_bbcode(tmdbID, mediaDescription, runDir, tmdb_api, arg.movie, notes)
 
         # Get MediaInfo Dump
         with open(runDir + "mediainfo.txt", "r", encoding='UTF-8') as infoFile:
@@ -759,7 +784,7 @@ def main():
         qbitInject(qbit_host=qbit_host, qbit_username=qbit_username, qbit_password=qbit_password, category=category, runDir=runDir, torrentFileName=torrentFileName, paused=paused, postName=postName)
 
 
-def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torrentFileName, paused, postName):
+def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torrentFileName, paused, postName, seedTimeLimit=None):
     logging.info("Logging in to qbit...")
     qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, REQUESTS_ARGS={'timeout': (60, 60)})
     logging.info("Logged in to qbit")
@@ -767,7 +792,7 @@ def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torren
     torrent_file = rf"{torrent_file}"
     logging.info(f"Injecting {torrent_file} to qbit...")
     try:
-        result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category=category, tags="Self-Upload", rename=postName)
+        result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category=category, tags="Self-Upload", rename=postName, seeding_time_limit=seedTimeLimit)
     except Exception as e:
         print(e)
     if result == "Ok.":
@@ -776,12 +801,16 @@ def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torren
         logging.critical(result)
 
 
-def get_prominent_color(tmdb_id, api_key, directory):
+def get_prominent_color(tmdb_id, api_key, directory, isMovie):
     logging.info(f"Fetching poster for TMDB ID: {tmdb_id}")
 
     # Make a request to the TMDB API to get the poster URL
-    response = requests.get(f'https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}')
+    if isMovie:
+        response = requests.get(f'https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}')
+    else:
+        response = requests.get(f'https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}')
     data = response.json()
+    logging.debug(data)
 
     # Get the poster path from the API response
     poster_path = data['poster_path']
@@ -806,9 +835,9 @@ def get_prominent_color(tmdb_id, api_key, directory):
     return dominant_colour
 
 
-def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, notes=None):
+def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, isMovie, notes=None):
     # average_color, prominent_color, prominent_color_hsv = get_prominent_color(tmdb_id, api_key, runDir)
-    prominent_color = get_prominent_color(tmdb_id, api_key, runDir)
+    prominent_color = get_prominent_color(tmdb_id, api_key, runDir, isMovie)
 
     bbcode = f'[color=#{prominent_color[0]:02x}{prominent_color[1]:02x}{prominent_color[2]:02x}][center][b]Description[/b][/center][/color]\n' \
              f'[center][quote]{mediaDesc}[/quote][/center]\n\n'
@@ -918,7 +947,15 @@ def uploadToPTPIMG(imageFile: str, api_key):
         files={"file-upload[0]": open(imageFile, 'rb').read()},
     )
     if not response.ok:
-        raise Exception(response.json())
+        logging.error("Upload to ptpimg failed, trying again...")
+        response = requests.post(
+            url="https://ptpimg.me/upload.php",
+            data={"api_key": api_key},
+            files={"file-upload[0]": open(imageFile, 'rb').read()},
+        )
+        if not response.ok:
+            logging.error("Upload failed again. Something is probably wrong with ptpimg")
+            raise Exception(response.json())
 
     logging.debug(response.json())
 
@@ -953,11 +990,14 @@ def get_colour_space(mediaInfo):
         return "SDR"
     try:
         if "Dolby Vision" in mediaInfo['media']['track'][1]['HDR_Format']:
-            if "HDR10" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
-                if "HDR10+" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
-                    return "DV HDR10+"
-                return "DV HDR"
-            else:
+            try:
+                if "HDR10" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
+                    if "HDR10+" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
+                        return "DV HDR10+"
+                    return "DV HDR"
+                else:
+                    return "DV"
+            except KeyError:
                 return "DV"
     except KeyError:
         logging.debug("Keyerror when looking for DV format")
