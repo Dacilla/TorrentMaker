@@ -14,14 +14,14 @@ import zipfile
 import configparser
 import guessit
 import ctypes
-import colorsys
+import Levenshtein
+import numpy as np
 
 from babel import Locale
 from pprint import pprint, pformat
 from base64 import b64encode
 from pymediainfo import MediaInfo
 from datetime import datetime
-from PIL import Image
 from colorthief import ColorThief
 
 from HUNOInfo import bannedEncoders, encoderGroups
@@ -199,7 +199,8 @@ def main():
             'QBIT_PASSWORD': '',
             'QBIT_HOST': '',
             'HUNO_URL': '',
-            'PTPIMG_API': ''
+            'PTPIMG_API': '',
+            'CATBOX_HASH': ''
         }
 
         with open('settings.ini', 'w') as configfile:
@@ -218,8 +219,11 @@ def main():
     qbit_host = config['DEFAULT']['QBIT_HOST']
     huno_url = config['DEFAULT']['HUNO_URL']
     ptpimg_api = config['DEFAULT']['PTPIMG_API']
+    catbox_hash = config['DEFAULT']['CATBOX_HASH']
     if ptpimg_api == '':
         ptpimg_api = None
+    if catbox_hash == '':
+        catbox_hash = None
 
     if not arg.skipMICheck:
         if not os.path.isdir("Mediainfo"):
@@ -286,21 +290,32 @@ def main():
     elif isFolder == 2:
         # List all files in the folder
         data = os.listdir(path)
-        # Sort the files alphabetically
+        # Sort the files by size descending
+        # data.sort(key=lambda f: os.path.getsize(os.path.join(path, f)), reverse=True)
         data.sort()
-
         # Look for the first video file
         for file in data:
             # Check the file extension
             name, ext = os.path.splitext(file)
             if ext in ['.mp4', '.avi', '.mkv']:
                 # Found a video file
-                videoFile = path + os.sep + file
-                mediaInfoText = getInfoDump(path + os.sep + file, runDir)
-                logging.debug(pformat(json.loads(mediaInfoText)))
-                break
+                logging.info("Video found: " + file)
+                guessItOutput = dict(guessit.guessit(os.path.join(path, file).replace('- ', '')))
+                if 'year' in guessItOutput or 'episode' in guessItOutput:
+                    videoFile = path + os.sep + file
+                    mediaInfoText = getInfoDump(path + os.sep + file, runDir)
+                    logging.debug(pformat(json.loads(mediaInfoText)))
+                    break
+                else:
+                    pprint(guessItOutput)
+                    answer = getUserInput("Is this file an episode or movie?")
+                    if answer:
+                        videoFile = path + os.sep + file
+                        mediaInfoText = getInfoDump(path + os.sep + file, runDir)
+                        logging.debug(pformat(json.loads(mediaInfoText)))
+                        break
     logging.info("Mediainfo dump created")
-    guessItOutput = dict(guessit.guessit(videoFile, ))
+    guessItOutput = dict(guessit.guessit(videoFile.replace('- ', '')))
     logging.info(pformat(guessItOutput))
     if 'release_group' in str(guessItOutput):
         group = guessItOutput['release_group']
@@ -319,7 +334,7 @@ def main():
             title = title + f" {guessItOutput['country'].alpha2}"
         # if 'year' in guessItOutput and guessItOutput['type'] == 'movie':
         #     title = title + f" {guessItOutput['year']}"
-        tmdbID = get_tmdb_id(title, tmdb_api)
+        tmdbID = get_tmdb_id(title, tmdb_api, arg.movie)
         if tmdbID:
             logging.info(f"TMDB ID Found: {tmdbID}")
         else:
@@ -377,17 +392,35 @@ def main():
 
     # Iterate over the timestamps and create a screenshot at each timestamp
     for timestamp in timestamps:
-        # Set the video position to the timestamp
-        video.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-        # Read the frame at the current position
-        success, image = video.read()
-        if success:
-            # Save the image to a file
-            cv2.imwrite(runDir + f"screenshots{os.sep}" + "screenshot_{}.png".format(timestamp), image)
-            logging.info(f"Screenshot made at {runDir}screenshots{os.sep}" + "screenshot_{}.png".format(timestamp))
+        while True:
+            # Set the video position to the timestamp
+            video.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            # Read the frame at the current position
+            success, image = video.read()
+            if success:
+                # Save the image to a temporary file
+                temp_image_path = runDir + f"screenshots{os.sep}" + "temp_screenshot.png"
+                cv2.imwrite(temp_image_path, image)
+
+                # Check the size of the image
+                image_size_kb = os.path.getsize(temp_image_path) / 1024
+
+                if image_size_kb < 100:
+                    # Delete the small image
+                    os.remove(temp_image_path)
+                    # Move the timestamp one second along
+                    timestamp += 1
+                else:
+                    # Save the image with the correct filename
+                    os.rename(temp_image_path, runDir + f"screenshots{os.sep}" + "screenshot_{}.png".format(timestamp))
+                    logging.info(f"Screenshot made at {runDir}screenshots{os.sep}" + "screenshot_{}.png".format(timestamp))
+                    break  # Break the loop if the image is of sufficient size
+            else:
+                break  # Break the loop if we can't read the frame
+
     video.release()
     if arg.upload:
-        if (arg.throttle and arg.upload) or arg.hardlink:
+        if (arg.throttle and arg.upload):
             if qbit_username != "" and qbit_password != "":
                 logging.info("Attempting to enable qbit upload speed limit")
                 logging.info("Logging in to qbit...")
@@ -412,51 +445,40 @@ def main():
                 except qbittorrentapi.APIConnectionError:
                     logging.error("Failed to connect to Qbit API. Continuing anyway...")
         logging.info("Uploading screenshots to imgbb")
-        api_endpoint = "https://api.imgbb.com/1/upload"
         images = os.listdir(f"{runDir}screenshots{os.sep}")
         logging.info("Screenshots loaded...")
         imgbb_brokey = False
+        ptpimg_brokey = False
         for image in images:
-            ptpupload = False
             logging.info(f"Uploading {image}")
+            image_url = None
             # Open the file and read the data
             filePath = runDir + "screenshots" + os.sep + image
-            with open(filePath, "rb") as imagefile:
-                file_data = imagefile.read()
-            # Set the payload for the POST request
-            payload = {
-                "key": imgbb_api,
-                "image": b64encode(file_data),
-            }
-            try:
-                if imgbb_brokey:
-                    raise Exception
-                response = requests.post(api_endpoint, payload)
-                # Get the image URL from the response
-                image_url = response.json()
-                if response.status_code != 200:
-                    logging.warning(pformat(image_url))
-                    raise Exception
-            except Exception:
-                if not imgbb_brokey:
-                    logging.error("Failed to upload to imgbb. It's probably down.")
-                    logging.info("PTPImg API exists. Attempting to upload there...")
-                imgbb_brokey = True
-                if ptpimg_api:
-                    image_url = uploadToPTPIMG(filePath, ptpimg_api)
-                    ptpupload = True
+            if not imgbb_brokey:
+                image_url, image_url_viewer = upload_to_imgbb(file_path=filePath, apiKey=imgbb_api)
+                if image_url is None or image_url_viewer is None:
+                    imgbb_brokey = True
+            if ptpimg_api and not ptpimg_brokey:
+                logging.info("PTPImg API exists. Attempting to upload there...")
+                image_url = uploadToPTPIMG(filePath, ptpimg_api)
+                if not image_url:
+                    ptpimg_brokey = True
+            if ptpimg_brokey and imgbb_brokey:
+                logging.info("Attempting to upload to catbox...")
+                image_url = upload_to_catbox(file_path=filePath, user_hash=catbox_hash)
+                if not image_url:
+                    logging.error("Uploading to catbox failed. Exiting..")
+                    exit(-1)
             logging.debug(image_url)
             try:
-                if ptpupload:
-                    bbcode = f"[url={image_url}][img]{image_url}[/img][/url]"
-                else:
-                    image_url = response.json()["data"]["url"]
-                    image_url_viewer = response.json()["data"]["url_viewer"]
+                if not imgbb_brokey:
                     # Print the image URL
                     # Template: [url=https://ibb.co/0fbvMqH][img]https://i.ibb.co/0fbvMqH/screenshot-785-895652173913.png[/img][/url]
                     bbcode = f"[url={image_url_viewer}][img]{image_url}[/img][/url]"
+                else:
+                    bbcode = f"[url={image_url}][img]{image_url}[/img][/url]"
                 with open(runDir + "showDesc.txt", "a") as fileAdd:
-                    fileAdd.write(bbcode + "\n")
+                    fileAdd.write("[center]" + bbcode + "[/center]\n")
                 logging.info(f"bbcode for image URL {image_url} added to showDesc.txt")
             except Exception as e:
                 logging.critical("Unexpected Exception: " + str(e))
@@ -531,7 +553,10 @@ def main():
         else:
             width = mediaInfoText['media']['track'][1]['Width']
             height = mediaInfoText['media']['track'][1]['Height']
-            frameRate = mediaInfoText['media']['track'][1]['FrameRate']
+            try:
+                frameRate = mediaInfoText['media']['track'][1]['FrameRate']
+            except Exception:
+                frameRate = mediaInfoText['media']['track'][1]['FrameRate_Original']
             resolution = getResolution(width=width, height=height, frameRate=frameRate)
         if "Interlaced" in str(mediaInfoText):
             resolution = resolution.replace("p", "i")
@@ -543,7 +568,7 @@ def main():
         if 'HEVC' in mediaInfoText['media']['track'][1]['Format']:
             if 'remux' in file.lower().replace('.', ''):
                 videoCodec = 'HEVC'
-            elif 'h265' in file.lower().replace('.', '') or ('hevc' in file.lower().replace('.', '') and 'x265' not in file.lower().replace('.', '') and 'BluRay' not in arg.source):
+            elif ('h265' in file.lower().replace('.', '') or ('hevc' in file.lower().replace('.', '') and 'x265' not in os.path.join(path, file).lower().replace('.', ''))) and 'BluRay' not in arg.source:
                 videoCodec = 'H265'
             else:
                 videoCodec = "x265"
@@ -551,9 +576,9 @@ def main():
             videoCodec = "VC-1"
         elif "V_MPEG2" in mediaInfoText['media']['track'][1]['CodecID']:
             videoCodec = "MPEG-2"
-        elif 'remux' in file.lower():
+        elif 'remux' in file.lower() or 'remux' in arg.source.lower():
             videoCodec = "AVC"
-        elif 'x264' in file.lower():
+        elif 'x264' in file.lower() and 'WEB-DL' not in arg.source:
             videoCodec = "x264"
         else:
             videoCodec = "H264"
@@ -612,15 +637,16 @@ def main():
         else:
             edition = ""
         # Get if repack
-        if "REPACK" in file:
+        if "repack" in os.path.join(path, file).lower() or 'v2' in os.path.join(path, file).lower():
             repack = " [REPACK]"
         else:
             repack = ""
         # Get if hybrid
-        if "hybrid" in file.lower():
-            hybrid = " Hybrid"
-        else:
-            hybrid = ""
+        hybrid = ""
+        # if "hybrid" in file.lower():
+        #     hybrid = " Hybrid"
+        # else:
+        #     hybrid = ""
         # Construct torrent name
         if arg.movie:
             torrentFileName = f"{showName} ({year}){edition} ({resolution} {source}{hybrid} {videoCodec} {colourSpace} {audio} {language} - {group}){repack}.torrent"
@@ -637,11 +663,11 @@ def main():
 
         logging.info("Final name: " + torrentFileName)
 
-        if arg.huno and arg.inject:
+        if (arg.huno and arg.inject) or arg.hardlink:
             head, tail = os.path.split(path)
             headBasename = os.path.basename(head)
             postName = torrentFileName.replace(".torrent", "")
-            if head != SEEDING_DIR:
+            if (head != SEEDING_DIR) or arg.hardlink:
                 logging.info("Attempting to create hardlinks for easy seeding...")
                 destination = os.path.join(SEEDING_DIR, postName)
                 copy_folder_structure(path, destination)
@@ -711,7 +737,7 @@ def main():
             TVDB_ID = tmdbtoIMDDdata['tvdb_id']
         # Get description
         try:
-            IMDB_ID = int(re.findall(r'\d+', IMDB_ID)[0])
+            IMDB_ID = re.findall(r'\d+', IMDB_ID)[0]
         except Exception:
             if arg.movie:
                 logging.info(f"Failed to find the IMDB ID from '{IMDB_ID}'. Please input just the numbers of the IMDB ID:")
@@ -730,13 +756,26 @@ def main():
         with open(runDir + "mediainfo.txt", "r", encoding='UTF-8') as infoFile:
             mediaInfoDump = infoFile.read()
 
+        # Check for stream friendly audio
+        streamFriendly = 1
+        if trackNum:
+            if 'Format' in str(mediaInfoText['media']['track'][trackNum]):
+                try:
+                    if mediaInfoText['media']['track'][trackNum]['Format'] in ['DTS', 'MLP FBA', 'FLAC', 'PCM']:
+                        streamFriendly = 0
+                except Exception:
+                    logging.error("Unable to find format in audio track")
+        else:
+            if mediaInfoText['media']['track'][1]['Format'] in ['DTS', 'MLP FBA', 'FLAC', 'PCM']:
+                streamFriendly = 0
+
         # Get post name
         postName = torrentFileName.replace(".torrent", "")
         torrent_file = runDir + torrentFileName
         torrent_file = {'torrent': open(torrent_file, 'rb')}
         data = {
             'season_pack': season_pack,
-            'stream': 1,
+            'stream': streamFriendly,
             'anonymous': 0,
             'internal': 0,
             'category_id': category,
@@ -764,6 +803,7 @@ def main():
         print(data)
         print("\n-------------------------\n")
         pprint(data)
+
         # print(headers)
         if arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
             # Make API requests
@@ -782,6 +822,67 @@ def main():
         else:
             paused = True
         qbitInject(qbit_host=qbit_host, qbit_username=qbit_username, qbit_password=qbit_password, category=category, runDir=runDir, torrentFileName=torrentFileName, paused=paused, postName=postName)
+
+
+# Define a function to check if an image is completely black
+def is_image_black(image):
+    return np.all(image == 0)
+
+
+def upload_to_imgbb(file_path, apiKey):
+    api_endpoint = "https://api.imgbb.com/1/upload"
+    logging.info("Uploading " + file_path + " to imgbb...")
+    with open(file_path, "rb") as imagefile:
+        file_data = imagefile.read()
+        # Set the payload for the POST request
+        payload = {
+            "key": apiKey,
+            "image": b64encode(file_data),
+        }
+        try:
+            response = requests.post(api_endpoint, payload)
+            # Get the image URL from the response
+            if response.status_code != 200:
+                logging.warning(pformat(response.json()))
+                return None, None
+            image_url = response.json()["data"]["url"]
+            image_url_viewer = response.json()["data"]["url_viewer"]
+            return image_url, image_url_viewer
+        except Exception:
+            return None, None
+
+
+def upload_to_catbox(file_path, user_hash=None):
+    # Catbox API endpoint for file upload
+    url = "https://catbox.moe/user/api.php"
+
+    # Prepare the file to be uploaded
+    files = {'fileToUpload': (file_path, open(file_path, 'rb'))}
+
+    # Prepare the request parameters (user hash)
+    data = {
+        'reqtype': 'fileupload',
+    }
+
+    if user_hash:
+        data['userhash']: user_hash
+
+    try:
+        # Send the POST request to Catbox API
+        response = requests.post(url, data=data, files=files)
+
+        # Check if the upload was successful and return the direct link
+        if response.status_code == 200:
+            direct_link = str(response.content.decode())
+            return direct_link
+        else:
+            # If upload failed, return an error message or handle the error accordingly
+            error_message = str(response.content)
+            return f"Upload failed: {error_message}"
+
+    except Exception as e:
+        logging.error(f"Error occurred: {e}\nResponse data: {response.content}")
+        return None
 
 
 def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torrentFileName, paused, postName, seedTimeLimit=None):
@@ -874,33 +975,61 @@ def is_valid_torf_hash(hash_str):
         return False
 
 
-def get_tmdb_id(name, api_key):
+def similarity(s1, s2):
+    distance = Levenshtein.distance(s1, s2)
+    max_len = max(len(s1), len(s2))
+    return 100 * (1 - distance / max_len)
+
+
+def get_tmdb_id(name, api_key, isMovie):
     """
     Returns the TMDB ID of a TV show or movie given its name.
     """
     # The base URL for the TMDB API
     logging.info("Looking for title: " + name)
 
-    base_url = "https://api.themoviedb.org/3"
+    # base_url = "https://api.themoviedb.org/3"
 
-    # The endpoint for searching for TV shows or movies by name
-    search_endpoint = "/search/multi"
+    # # The endpoint for searching for TV shows or movies by name
+    # search_endpoint = "/search/multi"
+
+    if isMovie:
+        url = f'https://api.themoviedb.org/3/search/movie?query={name}&api_key={api_key}'
+    else:
+        url = f'https://api.themoviedb.org/3/search/tv?query={name}&api_key={api_key}'
 
     # Construct the full URL for the search endpoint, with the query parameters
-    url = f"{base_url}{search_endpoint}?api_key={api_key}&query={name}"
+    # url = f"{base_url}{search_endpoint}?api_key={api_key}&query={name}"
 
     # Send a GET request to the API to search for the TV show or movie
     response = requests.get(url)
-
+    tmdb_id = None
     # Parse the response JSON to get the TMDB ID of the first result
     logging.debug(pformat(response.json()))
     results = response.json()["results"]
     if len(results) > 0:
-        tmdb_id = results[0]["id"]
+        for result in results:
+            try:
+                if isMovie:
+                    logging.info(f"Comparing {name} to {result['original_title']}, ID {result['id']}")
+                    titleSimilarity = max(similarity(name, result['original_title']), similarity(name, result['title']))
+                else:
+                    if 'name' in result:
+                        logging.info(f"Comparing {name} to {result['name']}, aka {result['original_name']}, ID {result['id']}")
+                        titleSimilarity = max(similarity(name, result['original_name']), similarity(name, result['name']))
+                    else:
+                        logging.info(f"Comparing {name} to {result['original_name']}, ID {result['id']}")
+                        titleSimilarity = similarity(name, result['original_name'])
+                logging.info("Similarity: " + str(titleSimilarity))
+                if titleSimilarity > 85:
+                    tmdb_id = result["id"]
+                    break
+            except KeyError:
+                continue
         return tmdb_id
 
     # If there are no results, return None
-    return None
+    return tmdb_id
 
 
 def notifyTaskbarIcon():
@@ -947,15 +1076,18 @@ def uploadToPTPIMG(imageFile: str, api_key):
         files={"file-upload[0]": open(imageFile, 'rb').read()},
     )
     if not response.ok:
-        logging.error("Upload to ptpimg failed, trying again...")
-        response = requests.post(
-            url="https://ptpimg.me/upload.php",
-            data={"api_key": api_key},
-            files={"file-upload[0]": open(imageFile, 'rb').read()},
-        )
-        if not response.ok:
-            logging.error("Upload failed again. Something is probably wrong with ptpimg")
-            raise Exception(response.json())
+        try:
+            logging.error("Upload to ptpimg failed, trying again...")
+            response = requests.post(
+                url="https://ptpimg.me/upload.php",
+                data={"api_key": api_key},
+                files={"file-upload[0]": open(imageFile, 'rb').read()},
+            )
+            if not response.ok:
+                logging.error("Upload failed again. Something is probably wrong with ptpimg")
+                raise Exception(response.json())
+        except Exception:
+            return None
 
     logging.debug(response.json())
 
@@ -1054,14 +1186,31 @@ def get_audio_info(mediaInfo):
     if audioFormat is None:
         if mediaInfo['media']['track'][trackNum]['Format'] in codecsDict:
             audioFormat = codecsDict[mediaInfo['media']['track'][trackNum]['Format']]
+        elif mediaInfo['media']['track'][trackNum]['Format'] == "MPEG Audio":
+            if mediaInfo['media']['track'][trackNum]['Format_Profile'] == 'Layer 3':
+                audioFormat = "MP3"
+
+    if 'PCM' in audioFormat:
+        if 'Format_Settings_Endianness' in mediaInfo['media']['track'][trackNum]:
+            if mediaInfo['media']['track'][trackNum]['Format_Settings_Endianness'] == "Little":
+                audioFormat = "LPCM"
 
     if audioFormat is None:
         logging.error("Audio format was not found")
 
     # Channels
-    channelsNum = mediaInfo['media']['track'][trackNum]['Channels']
+    if 'Channels_Original' in mediaInfo['media']['track'][trackNum]:
+        if int(mediaInfo['media']['track'][trackNum]['Channels']) > int(mediaInfo['media']['track'][trackNum]['Channels_Original']):
+            channelsNum = mediaInfo['media']['track'][trackNum]['Channels']
+        else:
+            channelsNum = mediaInfo['media']['track'][trackNum]['Channels_Original']
+    else:
+        channelsNum = mediaInfo['media']['track'][trackNum]['Channels']
     try:
-        channelsLayout = mediaInfo['media']['track'][trackNum]['ChannelLayout']
+        if 'ChannelLayout_Original' in mediaInfo['media']['track'][trackNum]:
+            channelsLayout = mediaInfo['media']['track'][trackNum]['ChannelLayout_Original']
+        else:
+            channelsLayout = mediaInfo['media']['track'][trackNum]['ChannelLayout']
         if "LFE" in channelsLayout:
             channelsNum = str(int(channelsNum) - 1)
             channelsNum2 = ".1"
@@ -1111,6 +1260,7 @@ def getResolution(width, height, frameRate):
     if height is not None and height in acceptedHeights:
         return f"{str(height)}p"
 
+    print(f"Width: {width}p\nHeight: {height}p")
     return input("Resolution could not be found. Please input the resolution manually (e.g. 1080p, 2160p, 720p)\n")
 
 

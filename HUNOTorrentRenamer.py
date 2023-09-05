@@ -12,7 +12,7 @@ import requests
 from pprint import pformat
 from datetime import datetime
 
-from torrentmaker import get_tmdb_id, getInfoDump, getUserInput, get_season, get_episode, getResolution, get_audio_info
+from torrentmaker import get_tmdb_id, getInfoDump, getUserInput, get_season, get_episode, getResolution, get_audio_info, get_colour_space, get_language_name
 
 __VERSION = "1.0.0"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
@@ -65,6 +65,12 @@ def main():
         action="store_true",
         default=False,
         help="Enable to hardlink the renamed files rather than renaming the originals"
+    )
+    parser.add_argument(
+        "--skipPrompts",
+        action="store_true",
+        default=False,
+        help="Enable to skip all user input"
     )
 
     arg = parser.parse_args()
@@ -135,7 +141,7 @@ def main():
         pathList.append(arg.path)
 
     for path in pathList:
-        guessItOutput = dict(guessit.guessit(path))
+        guessItOutput = dict(guessit.guessit(os.path.basename(path)))
         logging.info(pformat(guessItOutput))
 
         group = None
@@ -169,13 +175,10 @@ def main():
         else:
             tmdbID = arg.tmdb
 
-        isMovie = False
-        if 'type' in guessItOutput:
-            if guessItOutput['type'] == 'movie':
-                isMovie = True
-
         if os.path.exists(DUMPFILE):
             os.remove(DUMPFILE)
+
+        logging.info("Reading MediaInfo...")
         mediaInfoText = getInfoDump(path, os.getcwd())
 
         mediaInfoJson = json.loads(mediaInfoText.strip())
@@ -229,7 +232,7 @@ def main():
         if not isMovie:
             season = get_season(os.path.basename(path))
             logging.info("Season: " + season)
-            episode = "E" + get_episode(os.path.basename(path))
+            episode = "E" + str(max(int(get_episode(os.path.basename(path))), guessItOutput['episode'])).ljust(2, '0')
             logging.info("Episode: " + episode)
             episodeNum = season + episode
 
@@ -245,7 +248,7 @@ def main():
             if 'remux' in os.path.basename(path).lower().replace('.', ''):
                 videoCodec = 'HEVC'
             elif 'h265' in os.path.basename(path).lower().replace('.', '') or 'hevc' in os.path.basename(path).lower().replace('.', ''):
-                videoCodec = 'H.265'
+                videoCodec = 'H265'
             else:
                 videoCodec = "x265"
         elif "VC-1" in mediaInfoJson['media']['track'][1]['Format']:
@@ -257,11 +260,11 @@ def main():
         elif 'x264' in os.path.basename(path).lower():
             videoCodec = "x264"
         else:
-            videoCodec = "H.264"
+            videoCodec = "H264"
 
         logging.info("Video Codec: " + videoCodec)
 
-        audio = get_audio_info(mediaInfoJson).replace(' ', '')
+        audio = get_audio_info(mediaInfoJson)
         logging.info("Audio: " + audio)
 
         if arg.source:
@@ -283,14 +286,31 @@ def main():
             episodeTitle = guessItOutput['episode_title']
             episodeNum = episodeNum + ' ' + episodeTitle
 
+        # Get language
+        trackNum = None
+        for num, track in enumerate(mediaInfoJson['media']['track']):
+            if track['@type'] == "Audio":
+                trackNum = num
+                break
+        if 'Language' in mediaInfoJson['media']['track'][trackNum]:
+            language = get_language_name(mediaInfoJson['media']['track'][trackNum]['Language'])
+        else:
+            language = input("No language found in audio data. Please input language:\n")
+        logging.info("Language: " + language)
+
+        colourSpace = get_colour_space(mediaInfoJson)
+        logging.info("Colour Space: " + colourSpace)
         if isMovie:
             postFileName = ('.'.join([showName, year, resolution, source, audio, videoCodec]).replace(' ', '.') + '-' + arg.group + '.' + container).replace('\'', '').replace('..', '.')
         else:
-            postFileName = ('.'.join([showName, year, episodeNum, resolution, source, audio, videoCodec]).replace(' ', '.') + '-' + arg.group + '.' + container).replace('\'', '').replace('..', '.')
+            postFileName = f"{showName} ({year}) - {season}{episode} - {episodeTitle} ({resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {arg.group}).{container}".replace('é', 'e')
 
         logging.info("Final file name:\n" + postFileName)
-
-        if getUserInput("Is this acceptable?"):
+        if arg.skipPrompts:
+            skipPrompts = True
+        else:
+            skipPrompts = getUserInput("Is this acceptable?")
+        if skipPrompts:
             if os.path.exists(DUMPFILE):
                 os.remove(DUMPFILE)
             if arg.hardlink:

@@ -21,6 +21,7 @@ from pymediainfo import MediaInfo
 from mutagen.mp3 import MP3
 from mutagen.flac import FLAC
 from mutagen.easyid3 import EasyID3
+from mutagen import File
 import musicbrainzngs as mb
 from urllib.parse import unquote
 from ftplib import FTP_TLS
@@ -316,6 +317,27 @@ def main():
         else:
             create_track_list(path, runDir + "trackData.txt")
 
+        if ptpimg_api:
+            if os.path.exists(path + os.sep + "cover.jpg"):
+                cover = path + os.sep + "cover.jpg"
+            elif os.path.exists(path + os.sep + "cover.png"):
+                cover = path + os.sep + "cover.png"
+            elif arg.cover:
+                cover = arg.cover
+            else:
+                logging.info("No cover file found. Attempting to extract one from file metadata...")
+                if len(discsArr) > 0:
+                    cover = extract_album_art(discsArr[0])
+                else:
+                    cover = extract_album_art(path)
+            logging.info("Uploading cover image to ptpimg")
+            logging.info("Cover image path: " + cover)
+            coverImgURL = uploadToPTPIMG(cover, ptpimg_api)
+            with open(runDir + "coverImgURL.txt", 'w') as file:
+                file.write(coverImgURL)
+            logging.info("Cover image uploaded and URL added to " + runDir + "coverImgURL.txt")
+            logging.info("URL: " + coverImgURL)
+
         logging.info("Creating torrent file")
         torrent = torf.Torrent()
         torrent.private = True
@@ -337,21 +359,6 @@ def main():
         logging.info("Writing torrent file to disk...")
         torrent.write(runDir + torrentFileName)
         logging.info("Torrent file wrote to " + torrentFileName)
-
-        if (arg.cover or os.path.exists(path + os.sep + "cover.jpg") or os.path.exists(path + os.sep + "cover.png")) and ptpimg_api:
-            if os.path.exists(path + os.sep + "cover.jpg"):
-                cover = path + os.sep + "cover.jpg"
-            elif os.path.exists(path + os.sep + "cover.png"):
-                cover = path + os.sep + "cover.png"
-            else:
-                cover = arg.cover
-            logging.info("Uploading cover image to ptpimg")
-            logging.info("Cover image path: " + cover)
-            coverImgURL = uploadToPTPIMG(cover, ptpimg_api)
-            with open(runDir + "coverImgURL.txt", 'w') as file:
-                file.write(coverImgURL)
-            logging.info("Cover image uploaded and URL added to " + runDir + "coverImgURL.txt")
-            logging.info("URL: " + coverImgURL)
 
         if red_api and arg.upload:
             logging.info("Attempting to upload to RED...")
@@ -461,6 +468,35 @@ def main():
             else:
                 if not getUserInput("Upload failed. Continue anyway?"):
                     exit()
+
+
+def extract_album_art(folder_path):
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            if file.lower().endswith(('.mp3', '.flac', '.ogg', '.m4a', '.wav')):
+                audio_file_path = os.path.join(root, file)
+                audio = File(audio_file_path)
+                if 'APIC:' in audio:
+                    # For MP3 files
+                    cover = audio.tags['APIC:'].data
+                elif 'covr' in audio:
+                    # For M4A files
+                    cover = audio['covr'][0]
+                elif file.lower().endswith('.flac'):
+                    pics = audio.pictures
+                    for p in pics:
+                        if p.type == 3:
+                            logging.info("Found cover art")
+                            cover = p.data
+                else:
+                    continue
+                cover_path = os.path.join(folder_path, 'cover.jpg')
+                with open(cover_path, 'wb') as cover_file:
+                    cover_file.write(cover)
+
+                return cover_path
+    logging.info("No cover art found")
+    return None
 
 
 def fixMD5(folder_path):
@@ -585,6 +621,7 @@ def download_torrent(runDir, torrent_id, api_key):
 
 
 def get_release_year(path):
+    release_year = None
     for filename in os.listdir(path):
         if filename.endswith(".mp3"):
             audio = EasyID3(os.path.join(path, filename))
@@ -592,11 +629,19 @@ def get_release_year(path):
             break
         elif filename.endswith(".flac"):
             audio = FLAC(os.path.join(path, filename))
-            release_year = int(audio['year'][0])
+            if 'year' in audio:
+                release_year = int(audio['year'][0])
+            else:
+                if 'date' in audio:
+                    if len(audio['date'][0]) == 4:
+                        release_year = int(audio['date'][0])
             break
         else:
             continue  # Skip files that are not MP3 or FLAC
 
+    if release_year is None:
+        logging.error("No release year found please enter 4 digit release year")
+        release_year = int(input())
     return release_year
 
 
@@ -610,10 +655,13 @@ def get_genre(path):
             break
         else:
             continue  # Skip files that are not MP3 or FLAC
-
-    genre = audio['genre'][0]
-    genre = genre.replace('Alternatif et Indé', 'Alternative, Indie')
-    genre = genre.replace('Bandes originales de films', 'Stage and Screen')
+    try:
+        genre = audio['genre'][0]
+        genre = genre.replace('Alternatif et Indé', 'Alternative, Indie')
+        genre = genre.replace('Bandes originales de films', 'Stage and Screen')
+    except KeyError:
+        logging.error("No genre found, please give genres comma separated")
+        genre = input()
     return genre.lower()
 
 
@@ -954,6 +1002,8 @@ def get_first_song_artist(folder_path):
             artist = audio.get("albumartist", [])
             if isinstance(artist, list) and len(artist) > 0 and isinstance(artist[0], str):
                 return artist[0]
+            if audio.get("artist"):
+                return audio.get("artist")[0]
 
     # Return None if no first track is found
     logging.error("No suitable track found. This is the metadata of the files for debugging...")
