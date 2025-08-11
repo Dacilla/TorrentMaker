@@ -31,7 +31,7 @@ LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-1
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 DUMPFILE = "mediainfo.txt"
-SEEDING_DIR = f"S:{os.sep}Auto Downloads"
+SEEDING_DIR = f"P:{os.sep}Auto Downloads"
 
 # TODO: Add support for providing a torrent hash to skip the hashing process
 # TODO: Support anime with MAL ID (HUNO API Doesn't support MAL atm)
@@ -166,7 +166,7 @@ def main():
     parser.add_argument(
         "--skipMICheck",
         action="store_true",
-        default=False,
+        default=True,
         help="Enable to skip checking for MediaInfo CLI install"
     )
     parser.add_argument(
@@ -1189,11 +1189,11 @@ def get_audio_info(mediaInfo):
         elif mediaInfo['media']['track'][trackNum]['Format'] == "MPEG Audio":
             if mediaInfo['media']['track'][trackNum]['Format_Profile'] == 'Layer 3':
                 audioFormat = "MP3"
-
-    if 'PCM' in audioFormat:
-        if 'Format_Settings_Endianness' in mediaInfo['media']['track'][trackNum]:
+        elif 'Format_Settings_Endianness' in mediaInfo['media']['track'][trackNum]:
             if mediaInfo['media']['track'][trackNum]['Format_Settings_Endianness'] == "Little":
                 audioFormat = "LPCM"
+        elif 'Vorbis' in mediaInfo['media']['track'][trackNum]['Format']:
+            audioFormat = "Vorbis"
 
     if audioFormat is None:
         logging.error("Audio format was not found")

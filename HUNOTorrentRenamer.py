@@ -232,7 +232,7 @@ def main():
         if not isMovie:
             season = get_season(os.path.basename(path))
             logging.info("Season: " + season)
-            episode = "E" + str(max(int(get_episode(os.path.basename(path))), guessItOutput['episode'])).ljust(2, '0')
+            episode = "E" + get_episode(os.path.basename(path))
             logging.info("Episode: " + episode)
             episodeNum = season + episode
 
