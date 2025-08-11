@@ -28,7 +28,7 @@ from ftplib import FTP_TLS
 from tqdm import tqdm
 from concurrent import futures
 
-from torrent_utils.helpers import has_folders, cb, uploadToPTPIMG, copy_folder_structure, getUserInput, qbitInject
+from torrent_utils.helpers import has_folders, cb, uploadToPTPIMG, copy_folder_structure, getUserInput, qbitInject, similarity
 from torrent_utils.config_loader import load_settings, validate_settings
 
 __VERSION = "1.0.0"
@@ -578,12 +578,6 @@ def process_string(input_string):
     output_string = output_string.split(', ')[0].strip()
 
     return output_string
-
-
-def similarity(s1, s2):
-    distance = Levenshtein.distance(s1, s2)
-    max_len = max(len(s1), len(s2))
-    return 100 * (1 - distance / max_len)
 
 
 def download_torrent(runDir, torrent_id, api_key):

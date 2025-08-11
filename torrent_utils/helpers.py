@@ -10,11 +10,102 @@ import ctypes
 import Levenshtein
 import numpy as np
 import zipfile
+import platform
+import subprocess
+from base64 import b64encode
+from pprint import pformat
 
 from babel import Locale
 from pymediainfo import MediaInfo
 
 DUMPFILE = "mediainfo.txt"
+
+def download_mediainfo():
+    """Downloads and extracts the MediaInfo CLI tool as a last resort."""
+    url = "https://mediaarea.net/download/binary/mediainfo/22.12/MediaInfo_CLI_22.12_Windows_x64.zip"
+    destination_folder = "Mediainfo"
+    zip_path = "MediaInfo_CLI_temp.zip"
+
+    logging.info(f"Downloading MediaInfo CLI from {url}...")
+    try:
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        with open(zip_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        logging.info(f"Unpacking to ./{destination_folder}/")
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(destination_folder)
+        
+        logging.info("MediaInfo CLI downloaded and unpacked successfully.")
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to download MediaInfo: {e}")
+        sys.exit("Could not download required dependency.")
+    except zipfile.BadZipFile:
+        logging.error("Failed to unpack MediaInfo. The downloaded file may be corrupt.")
+        sys.exit("Could not unpack required dependency.")
+    finally:
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+
+def install_mediainfo_with_package_manager():
+    """Attempts to install MediaInfo using a detected package manager."""
+    system = platform.system()
+    if system == "Windows":
+        if shutil.which("winget"):
+            if getUserInput("MediaInfo not found. Attempt to install it using winget? (This may require administrator privileges)"):
+                try:
+                    logging.info("Running: winget install MediaInfo.MediaInfo -e --accept-source-agreements --accept-package-agreements")
+                    # Using '-e' for exact match and agreements to reduce user interaction
+                    subprocess.run(["winget", "install", "MediaInfo.MediaInfo", "-e", "--accept-source-agreements", "--accept-package-agreements"], check=True, shell=True)
+                    if shutil.which("mediainfo"):
+                        logging.info("MediaInfo installed successfully via winget.")
+                        return True
+                    else:
+                        logging.error("Winget installation appeared to succeed, but 'mediainfo' is still not in the PATH. You may need to restart your terminal.")
+                        return False
+                except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                    logging.error(f"Winget installation failed: {e}")
+                    return False
+        else:
+            logging.info("Windows Package Manager (winget) not found.")
+            return False
+    # Placeholder for other OSs
+    elif system == "Darwin": # macOS
+        logging.info("macOS detected, but Homebrew installation is not yet implemented.")
+        return False
+    elif system == "Linux":
+        logging.info("Linux detected, but package manager installation is not yet implemented.")
+        return False
+    return False
+
+def ensure_mediainfo_cli():
+    """
+    Checks if MediaInfo CLI is available. If not, attempts to install it
+    via a package manager, falling back to a local download.
+    """
+    # 1. Best case: Check if 'mediainfo' is in the system's PATH
+    if shutil.which("mediainfo"):
+        logging.info("MediaInfo CLI found in system PATH.")
+        return
+
+    # 2. Second best case: Check for a local executable
+    local_mediainfo_path = os.path.join("Mediainfo", "mediainfo.exe")
+    if os.path.exists(local_mediainfo_path):
+        logging.info(f"MediaInfo CLI found locally at '{local_mediainfo_path}'.")
+        return
+
+    # 3. Attempt to install with a package manager
+    logging.warning("MediaInfo CLI not found in PATH or locally.")
+    if install_mediainfo_with_package_manager():
+        return # Success!
+
+    # 4. If all else fails, fall back to local download
+    logging.info("Package manager installation failed or was skipped. Falling back to local download.")
+    download_mediainfo()
+
 
 def get_tmdb_id(name, api_key, isMovie):
     """
@@ -339,3 +430,74 @@ def FileOrFolder(path: str):
         return 2
     else:
         return 0
+
+def is_valid_torf_hash(hash_str):
+    """Checks if a string is a valid SHA-1 hash value for torf."""
+    try:
+        hash_bytes = bytes.fromhex(hash_str)
+        if len(hash_bytes) % 20 != 0:
+            return False
+        return True
+    except (ValueError, TypeError):
+        return False
+
+def convert_sha1_hash(hash_str):
+    """Converts a SHA-1 hash value to the format used by torf."""
+    hash_bytes = bytes.fromhex(hash_str)
+    hash_pieces = [hash_bytes[i:i+20] for i in range(0, len(hash_bytes), 20)]
+    return b''.join(hash_pieces)
+
+def upload_to_imgbb(file_path, apiKey):
+    api_endpoint = "https://api.imgbb.com/1/upload"
+    logging.info("Uploading " + file_path + " to imgbb...")
+    with open(file_path, "rb") as imagefile:
+        file_data = imagefile.read()
+        # Set the payload for the POST request
+        payload = {
+            "key": apiKey,
+            "image": b64encode(file_data),
+        }
+        try:
+            response = requests.post(api_endpoint, payload)
+            # Get the image URL from the response
+            if response.status_code != 200:
+                logging.warning(pformat(response.json()))
+                return None, None
+            image_url = response.json()["data"]["url"]
+            image_url_viewer = response.json()["data"]["url_viewer"]
+            return image_url, image_url_viewer
+        except Exception:
+            return None, None
+
+
+def upload_to_catbox(file_path, user_hash=None):
+    # Catbox API endpoint for file upload
+    url = "https://catbox.moe/user/api.php"
+
+    # Prepare the file to be uploaded
+    files = {'fileToUpload': (file_path, open(file_path, 'rb'))}
+
+    # Prepare the request parameters (user hash)
+    data = {
+        'reqtype': 'fileupload',
+    }
+
+    if user_hash:
+        data['userhash']: user_hash
+
+    try:
+        # Send the POST request to Catbox API
+        response = requests.post(url, data=data, files=files)
+
+        # Check if the upload was successful and return the direct link
+        if response.status_code == 200:
+            direct_link = str(response.content.decode())
+            return direct_link
+        else:
+            # If upload failed, return an error message or handle the error accordingly
+            error_message = str(response.content)
+            return f"Upload failed: {error_message}"
+
+    except Exception as e:
+        logging.error(f"Error occurred: {e}\nResponse data: {response.content}")
+        return None

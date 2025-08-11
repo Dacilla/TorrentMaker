@@ -17,7 +17,7 @@ import ctypes
 import Levenshtein
 import numpy as np
 
-from pprint import pprint, pformat
+from pprint import pformat
 from base64 import b64encode
 from pymediainfo import MediaInfo
 from datetime import datetime
@@ -30,7 +30,7 @@ from torrent_utils.helpers import (
     getResolution, get_audio_info, get_colour_space, get_language_name,
     similarity, has_folders, cb, uploadToPTPIMG, copy_folder_structure, 
     qbitInject, FileOrFolder, is_valid_torf_hash, convert_sha1_hash,
-    upload_to_imgbb, upload_to_catbox
+    ensure_mediainfo_cli
 )
 
 __VERSION = "1.0.0"
@@ -40,7 +40,6 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 # TODO: Add support for providing a torrent hash to skip the hashing process
 # TODO: Support anime with MAL ID (HUNO API Doesn't support MAL atm)
 # TODO: Add detection of bluray extras
-# TODO: Download Mediainfo if it's not found
 # TODO: Add support for more trackers
 # TODO: Add documentation to readme
 # TODO: Support BD Raw Discs
@@ -169,7 +168,7 @@ def main():
     parser.add_argument(
         "--skipMICheck",
         action="store_true",
-        default=True,
+        default=False,
         help="Enable to skip checking for MediaInfo CLI install"
     )
     parser.add_argument(
@@ -222,21 +221,7 @@ def main():
     # --- END Settings Section ---
 
     if not arg.skipMICheck:
-        if not os.path.isdir("Mediainfo"):
-            os.mkdir("Mediainfo")
-        # Iterate through all the files in the root folder and its subfolders
-        mediainfoExists = False
-        for root, dirs, files in os.walk("Mediainfo"):
-            for file in files:
-                if file.lower == "mediainfo.exe":
-                    mediainfoExists = True
-                    logging.info("Mediainfo CLI found!")
-                    break
-            if mediainfoExists:
-                break
-        if not mediainfoExists:
-            logging.info("Mediainfo CLI not found. Downloading...")
-            downloadMediainfo()
+        ensure_mediainfo_cli()
 
     path = arg.path
     isFolder = FileOrFolder(path)
@@ -857,17 +842,60 @@ def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, isMovie, notes=None):
     logging.info("Final bbcode written to " + runDir + "showDesc.txt")
     return bbcode
 
-def downloadMediainfo():
-    url = "https://mediaarea.net/download/binary/mediainfo/22.12/MediaInfo_CLI_22.12_Windows_x64.zip"
-    destination_folder = "Mediainfo"
-    if not os.path.exists(destination_folder):
-        os.makedirs(destination_folder)
-    response = requests.get(url)
-    open("MediaInfo_CLI_22.12_Windows_x64.zip", "wb").write(response.content)
-    logging.info("MediaInfo_CLI_22.12_Windows_x64.zip downloaded. Unpacking in to ./Mediainfo/")
-    with zipfile.ZipFile("MediaInfo_CLI_22.12_Windows_x64.zip", "r") as zip_ref:
-        zip_ref.extractall(destination_folder)
-    os.remove("MediaInfo_CLI_22.12_Windows_x64.zip")
+def upload_to_imgbb(file_path, apiKey):
+    api_endpoint = "https://api.imgbb.com/1/upload"
+    logging.info("Uploading " + file_path + " to imgbb...")
+    with open(file_path, "rb") as imagefile:
+        file_data = imagefile.read()
+        # Set the payload for the POST request
+        payload = {
+            "key": apiKey,
+            "image": b64encode(file_data),
+        }
+        try:
+            response = requests.post(api_endpoint, payload)
+            # Get the image URL from the response
+            if response.status_code != 200:
+                logging.warning(pformat(response.json()))
+                return None, None
+            image_url = response.json()["data"]["url"]
+            image_url_viewer = response.json()["data"]["url_viewer"]
+            return image_url, image_url_viewer
+        except Exception:
+            return None, None
+
+
+def upload_to_catbox(file_path, user_hash=None):
+    # Catbox API endpoint for file upload
+    url = "https://catbox.moe/user/api.php"
+
+    # Prepare the file to be uploaded
+    files = {'fileToUpload': (file_path, open(file_path, 'rb'))}
+
+    # Prepare the request parameters (user hash)
+    data = {
+        'reqtype': 'fileupload',
+    }
+
+    if user_hash:
+        data['userhash']: user_hash
+
+    try:
+        # Send the POST request to Catbox API
+        response = requests.post(url, data=data, files=files)
+
+        # Check if the upload was successful and return the direct link
+        if response.status_code == 200:
+            direct_link = str(response.content.decode())
+            return direct_link
+        else:
+            # If upload failed, return an error message or handle the error accordingly
+            error_message = str(response.content)
+            return f"Upload failed: {error_message}"
+
+    except Exception as e:
+        logging.error(f"Error occurred: {e}\nResponse data: {response.content}")
+        return None
 
 if __name__ == "__main__":
     main()
