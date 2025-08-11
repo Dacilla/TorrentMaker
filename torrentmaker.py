@@ -17,21 +17,25 @@ import ctypes
 import Levenshtein
 import numpy as np
 
-from babel import Locale
 from pprint import pprint, pformat
 from base64 import b64encode
 from pymediainfo import MediaInfo
 from datetime import datetime
 from colorthief import ColorThief
 
-from HUNOInfo import bannedEncoders, encoderGroups
+from torrent_utils.config_loader import load_settings, validate_settings
+from torrent_utils.HUNOInfo import bannedEncoders, encoderGroups
+from torrent_utils.helpers import (
+    get_tmdb_id, getInfoDump, getUserInput, get_season, get_episode, 
+    getResolution, get_audio_info, get_colour_space, get_language_name,
+    similarity, has_folders, cb, uploadToPTPIMG, copy_folder_structure, 
+    qbitInject, FileOrFolder, is_valid_torf_hash, convert_sha1_hash,
+    upload_to_imgbb, upload_to_catbox
+)
 
 __VERSION = "1.0.0"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-DUMPFILE = "mediainfo.txt"
-SEEDING_DIR = f"P:{os.sep}Auto Downloads"
 
 # TODO: Add support for providing a torrent hash to skip the hashing process
 # TODO: Support anime with MAL ID (HUNO API Doesn't support MAL atm)
@@ -45,7 +49,6 @@ SEEDING_DIR = f"P:{os.sep}Auto Downloads"
 # TODO: Add function to stop multiple instances from reading off the same drive, slowing it down for both
 
 # https://qbittorrent-api.readthedocs.io/en/latest/apidoc/torrents.html#qbittorrentapi.torrents.TorrentDictionary.rename_file
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -187,43 +190,36 @@ def main():
     logging.basicConfig(datefmt=LOG_DATE_FORMAT, format=LOG_FORMAT, level=level)
     logging.info(f"Version {__VERSION} starting...")
 
-    if not os.path.exists('settings.ini'):
-        logging.info("No settings.ini file found. Generating...")
-        config = configparser.ConfigParser()
+    # --- Load and Validate Settings ---
+    settings = load_settings()
+    
+    required_settings = ['TMDB_API']
+    if arg.huno:
+        required_settings.extend(['HUNO_API', 'HUNO_URL'])
+    if arg.inject or arg.throttle:
+        required_settings.extend(['QBIT_HOST', 'QBIT_USERNAME', 'QBIT_PASSWORD'])
+    if arg.hardlink or (arg.huno and arg.inject):
+        required_settings.append('SEEDING_DIR')
 
-        config['DEFAULT'] = {
-            'HUNO_API': '',
-            'TMDB_API': '',
-            'IMGBB_API': '',
-            'QBIT_USERNAME': '',
-            'QBIT_PASSWORD': '',
-            'QBIT_HOST': '',
-            'HUNO_URL': '',
-            'PTPIMG_API': '',
-            'CATBOX_HASH': ''
-        }
-
-        with open('settings.ini', 'w') as configfile:
-            config.write(configfile)
-
-        sys.exit("settings.ini file generated. Please fill out before running again")
-
-    # Load the INI file
-    config = configparser.ConfigParser()
-    config.read('settings.ini')
-    huno_api = config['DEFAULT']['HUNO_API']
-    tmdb_api = config['DEFAULT']['TMDB_API']
-    imgbb_api = config['DEFAULT']['IMGBB_API']
-    qbit_username = config['DEFAULT']['QBIT_USERNAME']
-    qbit_password = config['DEFAULT']['QBIT_PASSWORD']
-    qbit_host = config['DEFAULT']['QBIT_HOST']
-    huno_url = config['DEFAULT']['HUNO_URL']
-    ptpimg_api = config['DEFAULT']['PTPIMG_API']
-    catbox_hash = config['DEFAULT']['CATBOX_HASH']
+    validate_settings(settings, required_settings)
+    
+    # Assign settings to variables to maintain original script structure
+    huno_api = settings.get('HUNO_API')
+    tmdb_api = settings.get('TMDB_API')
+    imgbb_api = settings.get('IMGBB_API')
+    qbit_username = settings.get('QBIT_USERNAME')
+    qbit_password = settings.get('QBIT_PASSWORD')
+    qbit_host = settings.get('QBIT_HOST')
+    huno_url = settings.get('HUNO_URL')
+    ptpimg_api = settings.get('PTPIMG_API')
+    catbox_hash = settings.get('CATBOX_HASH')
+    seeding_dir = settings.get('SEEDING_DIR')
+    
     if ptpimg_api == '':
         ptpimg_api = None
     if catbox_hash == '':
         catbox_hash = None
+    # --- END Settings Section ---
 
     if not arg.skipMICheck:
         if not os.path.isdir("Mediainfo"):
@@ -282,7 +278,7 @@ def main():
         runDir = os.getcwd() + os.sep + "runs" + os.sep + maxValue + os.sep
 
     logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
-    logging.info(f"Creating mediainfo dump in {runDir + DUMPFILE}...")
+    logging.info(f"Creating mediainfo dump in {runDir}...")
     if isFolder == 1:
         videoFile = path
         file = os.path.basename(path)
@@ -665,11 +661,10 @@ def main():
 
         if (arg.huno and arg.inject) or arg.hardlink:
             head, tail = os.path.split(path)
-            headBasename = os.path.basename(head)
             postName = torrentFileName.replace(".torrent", "")
-            if (head != SEEDING_DIR) or arg.hardlink:
+            if (head != seeding_dir) or arg.hardlink:
                 logging.info("Attempting to create hardlinks for easy seeding...")
-                destination = os.path.join(SEEDING_DIR, postName)
+                destination = os.path.join(seeding_dir, postName)
                 copy_folder_structure(path, destination)
                 logging.info("Hardlinks created at " + destination)
                 torrent.path = destination
@@ -771,8 +766,7 @@ def main():
 
         # Get post name
         postName = torrentFileName.replace(".torrent", "")
-        torrent_file = runDir + torrentFileName
-        torrent_file = {'torrent': open(torrent_file, 'rb')}
+        torrent_file = {'torrent': open(runDir + torrentFileName, 'rb')}
         data = {
             'season_pack': season_pack,
             'stream': streamFriendly,
@@ -820,126 +814,36 @@ def main():
             category = "HUNO"
             paused = False
         else:
+            category = ""
             paused = True
+        postName = torrentFileName.replace(".torrent", "")
         qbitInject(qbit_host=qbit_host, qbit_username=qbit_username, qbit_password=qbit_password, category=category, runDir=runDir, torrentFileName=torrentFileName, paused=paused, postName=postName)
-
-
-# Define a function to check if an image is completely black
-def is_image_black(image):
-    return np.all(image == 0)
-
-
-def upload_to_imgbb(file_path, apiKey):
-    api_endpoint = "https://api.imgbb.com/1/upload"
-    logging.info("Uploading " + file_path + " to imgbb...")
-    with open(file_path, "rb") as imagefile:
-        file_data = imagefile.read()
-        # Set the payload for the POST request
-        payload = {
-            "key": apiKey,
-            "image": b64encode(file_data),
-        }
-        try:
-            response = requests.post(api_endpoint, payload)
-            # Get the image URL from the response
-            if response.status_code != 200:
-                logging.warning(pformat(response.json()))
-                return None, None
-            image_url = response.json()["data"]["url"]
-            image_url_viewer = response.json()["data"]["url_viewer"]
-            return image_url, image_url_viewer
-        except Exception:
-            return None, None
-
-
-def upload_to_catbox(file_path, user_hash=None):
-    # Catbox API endpoint for file upload
-    url = "https://catbox.moe/user/api.php"
-
-    # Prepare the file to be uploaded
-    files = {'fileToUpload': (file_path, open(file_path, 'rb'))}
-
-    # Prepare the request parameters (user hash)
-    data = {
-        'reqtype': 'fileupload',
-    }
-
-    if user_hash:
-        data['userhash']: user_hash
-
-    try:
-        # Send the POST request to Catbox API
-        response = requests.post(url, data=data, files=files)
-
-        # Check if the upload was successful and return the direct link
-        if response.status_code == 200:
-            direct_link = str(response.content.decode())
-            return direct_link
-        else:
-            # If upload failed, return an error message or handle the error accordingly
-            error_message = str(response.content)
-            return f"Upload failed: {error_message}"
-
-    except Exception as e:
-        logging.error(f"Error occurred: {e}\nResponse data: {response.content}")
-        return None
-
-
-def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torrentFileName, paused, postName, seedTimeLimit=None):
-    logging.info("Logging in to qbit...")
-    qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, REQUESTS_ARGS={'timeout': (60, 60)})
-    logging.info("Logged in to qbit")
-    torrent_file = runDir + torrentFileName
-    torrent_file = rf"{torrent_file}"
-    logging.info(f"Injecting {torrent_file} to qbit...")
-    try:
-        result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category=category, tags="Self-Upload", rename=postName, seeding_time_limit=seedTimeLimit)
-    except Exception as e:
-        print(e)
-    if result == "Ok.":
-        logging.info("Torrent successfully injected.")
-    else:
-        logging.critical(result)
-
 
 def get_prominent_color(tmdb_id, api_key, directory, isMovie):
     logging.info(f"Fetching poster for TMDB ID: {tmdb_id}")
-
-    # Make a request to the TMDB API to get the poster URL
     if isMovie:
         response = requests.get(f'https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}')
     else:
         response = requests.get(f'https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}')
     data = response.json()
     logging.debug(data)
-
-    # Get the poster path from the API response
     poster_path = data['poster_path']
     poster_url = f'https://image.tmdb.org/t/p/w500/{poster_path}'
-
     logging.info(f"Downloading poster from URL: {poster_url}")
-
-    # Download and save the poster image
     response = requests.get(poster_url, stream=True)
     response.raise_for_status()
     poster_path = os.path.join(directory, 'poster.jpg')
     with open(poster_path, 'wb') as file:
         for chunk in response.iter_content(chunk_size=8192):
             file.write(chunk)
-
     logging.info("Poster downloaded and saved successfully")
     logging.info("Opening poster...")
-
     color_thief = ColorThief(poster_path)
-    # get the dominant color
     dominant_colour = color_thief.get_color(quality=1)
     return dominant_colour
 
-
 def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, isMovie, notes=None):
-    # average_color, prominent_color, prominent_color_hsv = get_prominent_color(tmdb_id, api_key, runDir)
     prominent_color = get_prominent_color(tmdb_id, api_key, runDir, isMovie)
-
     bbcode = f'[color=#{prominent_color[0]:02x}{prominent_color[1]:02x}{prominent_color[2]:02x}][center][b]Description[/b][/center][/color]\n' \
              f'[center][quote]{mediaDesc}[/quote][/center]\n\n'
     if notes:
@@ -948,446 +852,22 @@ def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, isMovie, notes=None):
     bbcode += f'[color=#{prominent_color[0]:02x}{prominent_color[1]:02x}{prominent_color[2]:02x}][center][b]Screens[/b][/center][/color]\n'
     with open(runDir + "showDesc.txt") as f:
         bbcode += f.read()
-
     with open(runDir + "showDesc.txt", 'w', encoding='utf-8') as fi:
         fi.write(bbcode)
-
     logging.info("Final bbcode written to " + runDir + "showDesc.txt")
-
     return bbcode
 
-
-def convert_sha1_hash(hash_str):
-    """Converts a SHA-1 hash value to the format used by torf."""
-    hash_bytes = bytes.fromhex(hash_str)
-    hash_pieces = [hash_bytes[i:i+20] for i in range(0, len(hash_bytes), 20)]
-    return b''.join(hash_pieces)
-
-
-def is_valid_torf_hash(hash_str):
-    """Checks if a string is a valid SHA-1 hash value for torf."""
-    try:
-        hash_bytes = bytes.fromhex(hash_str)
-        if len(hash_bytes) != 20:
-            return False
-        return True
-    except ValueError:
-        return False
-
-
-def similarity(s1, s2):
-    distance = Levenshtein.distance(s1, s2)
-    max_len = max(len(s1), len(s2))
-    return 100 * (1 - distance / max_len)
-
-
-def get_tmdb_id(name, api_key, isMovie):
-    """
-    Returns the TMDB ID of a TV show or movie given its name.
-    """
-    # The base URL for the TMDB API
-    logging.info("Looking for title: " + name)
-
-    # base_url = "https://api.themoviedb.org/3"
-
-    # # The endpoint for searching for TV shows or movies by name
-    # search_endpoint = "/search/multi"
-
-    if isMovie:
-        url = f'https://api.themoviedb.org/3/search/movie?query={name}&api_key={api_key}'
-    else:
-        url = f'https://api.themoviedb.org/3/search/tv?query={name}&api_key={api_key}'
-
-    # Construct the full URL for the search endpoint, with the query parameters
-    # url = f"{base_url}{search_endpoint}?api_key={api_key}&query={name}"
-
-    # Send a GET request to the API to search for the TV show or movie
-    response = requests.get(url)
-    tmdb_id = None
-    # Parse the response JSON to get the TMDB ID of the first result
-    logging.debug(pformat(response.json()))
-    results = response.json()["results"]
-    if len(results) > 0:
-        for result in results:
-            try:
-                if isMovie:
-                    logging.info(f"Comparing {name} to {result['original_title']}, ID {result['id']}")
-                    titleSimilarity = max(similarity(name, result['original_title']), similarity(name, result['title']))
-                else:
-                    if 'name' in result:
-                        logging.info(f"Comparing {name} to {result['name']}, aka {result['original_name']}, ID {result['id']}")
-                        titleSimilarity = max(similarity(name, result['original_name']), similarity(name, result['name']))
-                    else:
-                        logging.info(f"Comparing {name} to {result['original_name']}, ID {result['id']}")
-                        titleSimilarity = similarity(name, result['original_name'])
-                logging.info("Similarity: " + str(titleSimilarity))
-                if titleSimilarity > 85:
-                    tmdb_id = result["id"]
-                    break
-            except KeyError:
-                continue
-        return tmdb_id
-
-    # If there are no results, return None
-    return tmdb_id
-
-
-def notifyTaskbarIcon():
-    # Define the path to the executable file
-    executable_path = os.path.abspath(__file__)
-
-    # Define the FLASHW_TRAY flag to flash the taskbar button
-    FLASHW_TRAY = 0x00000002
-
-    # Define the FLASHW_TIMERNOFG flag to flash continuously
-    FLASHW_TIMERNOFG = 0x0000000C
-
-    # Define the structure for the FLASHWINFO object
-    class FLASHWINFO(ctypes.Structure):
-        _fields_ = [
-            ('cbSize', ctypes.c_uint),
-            ('hwnd', ctypes.c_void_p),
-            ('dwFlags', ctypes.c_uint),
-            ('uCount', ctypes.c_uint),
-            ('dwTimeout', ctypes.c_uint),
-        ]
-
-    # Get a handle to the current process window
-    hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-
-    # Define the FLASHWINFO object with the appropriate parameters
-    flash = FLASHWINFO(
-        ctypes.sizeof(FLASHWINFO),
-        hwnd,
-        FLASHW_TRAY | FLASHW_TIMERNOFG,
-        0,
-        0,
-    )
-
-    # Call the FlashWindowEx function to flash the taskbar button
-    ctypes.windll.user32.FlashWindowEx(ctypes.byref(flash))
-
-
-def uploadToPTPIMG(imageFile: str, api_key):
-    # Stole this code from https://github.com/DeadNews/images-upload-cli
-    response = requests.post(
-        url="https://ptpimg.me/upload.php",
-        data={"api_key": api_key},
-        files={"file-upload[0]": open(imageFile, 'rb').read()},
-    )
-    if not response.ok:
-        try:
-            logging.error("Upload to ptpimg failed, trying again...")
-            response = requests.post(
-                url="https://ptpimg.me/upload.php",
-                data={"api_key": api_key},
-                files={"file-upload[0]": open(imageFile, 'rb').read()},
-            )
-            if not response.ok:
-                logging.error("Upload failed again. Something is probably wrong with ptpimg")
-                raise Exception(response.json())
-        except Exception:
-            return None
-
-    logging.debug(response.json())
-
-    return f"https://ptpimg.me/{response.json()[0]['code']}.{response.json()[0]['ext']}"
-
-
-def get_episode(filename: str):
-    import re
-    match = re.search(r'S\d{2}E\d{2}', filename.upper())
-    if match:
-        return match.group().split('E')[1]
-    return input("Episode number can't be found. Please enter episode number in format 'E00'\n")
-
-
-def check_folder_for_episode(folder_path):
-    # list all files in folder
-    files = os.listdir(folder_path)
-    video_files = [f for f in files if f.endswith('.mp4') or f.endswith('.mkv') or f.endswith('.avi')]
-    # check if there is only one video file
-    if len(video_files) != 1:
-        return None
-    # check if the video file name has format S00E00
-    episode_pattern = re.compile(r'S\d{2}E\d{2}')
-    match = episode_pattern.search(video_files[0])
-    if match:
-        return match.group()
-    return None
-
-
-def get_colour_space(mediaInfo):
-    if "HDR" not in str(mediaInfo):
-        return "SDR"
-    try:
-        if "Dolby Vision" in mediaInfo['media']['track'][1]['HDR_Format']:
-            try:
-                if "HDR10" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
-                    if "HDR10+" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
-                        return "DV HDR10+"
-                    return "DV HDR"
-                else:
-                    return "DV"
-            except KeyError:
-                return "DV"
-    except KeyError:
-        logging.debug("Keyerror when looking for DV format")
-        if mediaInfo['media']['track'][1]['colour_primaries'] in ['BT.2020', 'DCI-P3'] or mediaInfo['media']['track'][1]['transfer_characteristics'] in ['PQ', 'HLG']:
-            return "HDR"
-    if "HDR10+" in mediaInfo['media']['track'][1]['HDR_Format_Compatibility']:
-        return "HDR10+"
-    return "HDR"
-
-
-def get_audio_info(mediaInfo):
-    # Codec
-    codecsDict = {
-        "E-AC-3": "EAC3",
-        "MLP FBA": "TrueHD",
-        "DTS": "DTS",
-        "AAC": "AAC",
-        "PCM": "PCM",
-        "AC-3": "DD",
-        "FLAC": "FLAC",
-        "Opus": "OPUS"
-    }
-    audioFormat = None
-    trackNum = None
-    for num, track in enumerate(mediaInfo['media']['track']):
-        if track['@type'] == "Audio":
-            trackNum = num
-            break
-
-    if trackNum is None:
-        logging.warning("No audio track found!")
-        return ""
-
-    if 'Format_Commercial_IfAny' in str(mediaInfo['media']['track'][trackNum]):
-        if mediaInfo['media']['track'][trackNum]['Format_Commercial_IfAny']:
-            commercialFormat = mediaInfo['media']['track'][trackNum]['Format_Commercial_IfAny']
-            if "Dolby Digital" in commercialFormat:
-                if "Plus" in commercialFormat:
-                    audioFormat = "DDP"
-                else:
-                    audioFormat = "DD"
-            elif "TrueHD" in commercialFormat:
-                audioFormat = "TrueHD"
-            elif "DTS" in commercialFormat:
-                if "HD High Resolution" in commercialFormat:
-                    audioFormat = "DTS-HD HR"
-                elif "Master Audio" in commercialFormat:
-                    audioFormat = "DTS-HD MA"
-                elif "DTS-ES" in commercialFormat:
-                    audioFormat = "DTS-ES"
-            if 'Atmos' in commercialFormat:
-                audioFormat = audioFormat + " Atmos"
-
-    if audioFormat is None:
-        if mediaInfo['media']['track'][trackNum]['Format'] in codecsDict:
-            audioFormat = codecsDict[mediaInfo['media']['track'][trackNum]['Format']]
-        elif mediaInfo['media']['track'][trackNum]['Format'] == "MPEG Audio":
-            if mediaInfo['media']['track'][trackNum]['Format_Profile'] == 'Layer 3':
-                audioFormat = "MP3"
-        elif 'Format_Settings_Endianness' in mediaInfo['media']['track'][trackNum]:
-            if mediaInfo['media']['track'][trackNum]['Format_Settings_Endianness'] == "Little":
-                audioFormat = "LPCM"
-        elif 'Vorbis' in mediaInfo['media']['track'][trackNum]['Format']:
-            audioFormat = "Vorbis"
-
-    if audioFormat is None:
-        logging.error("Audio format was not found")
-
-    # Channels
-    if 'Channels_Original' in mediaInfo['media']['track'][trackNum]:
-        if int(mediaInfo['media']['track'][trackNum]['Channels']) > int(mediaInfo['media']['track'][trackNum]['Channels_Original']):
-            channelsNum = mediaInfo['media']['track'][trackNum]['Channels']
-        else:
-            channelsNum = mediaInfo['media']['track'][trackNum]['Channels_Original']
-    else:
-        channelsNum = mediaInfo['media']['track'][trackNum]['Channels']
-    try:
-        if 'ChannelLayout_Original' in mediaInfo['media']['track'][trackNum]:
-            channelsLayout = mediaInfo['media']['track'][trackNum]['ChannelLayout_Original']
-        else:
-            channelsLayout = mediaInfo['media']['track'][trackNum]['ChannelLayout']
-        if "LFE" in channelsLayout:
-            channelsNum = str(int(channelsNum) - 1)
-            channelsNum2 = ".1"
-        else:
-            channelsNum2 = ".0"
-        channelsNum = channelsNum + channelsNum2
-    except KeyError:
-        logging.info("Couldn't find channel layout. Assuming no sub tracks.")
-        channelsNum = channelsNum + ".0"
-    audioInfo = audioFormat + " " + channelsNum
-    return audioInfo
-
-
 def downloadMediainfo():
-    # Set the URL for the mediainfo download
     url = "https://mediaarea.net/download/binary/mediainfo/22.12/MediaInfo_CLI_22.12_Windows_x64.zip"
-
-    # Set the destination folder
     destination_folder = "Mediainfo"
-
-    # Create the destination folder if it doesn't already exist
     if not os.path.exists(destination_folder):
         os.makedirs(destination_folder)
-
-    # Download the file
     response = requests.get(url)
     open("MediaInfo_CLI_22.12_Windows_x64.zip", "wb").write(response.content)
     logging.info("MediaInfo_CLI_22.12_Windows_x64.zip downloaded. Unpacking in to ./Mediainfo/")
-    # Unpack the zip file
     with zipfile.ZipFile("MediaInfo_CLI_22.12_Windows_x64.zip", "r") as zip_ref:
         zip_ref.extractall(destination_folder)
-
-    # Delete the zip file
     os.remove("MediaInfo_CLI_22.12_Windows_x64.zip")
-
-
-def getResolution(width, height, frameRate):
-    width_to_height_dict = {"720": "576", "960": "540", "1280": "720", "1920": "1080", "4096": "2160", "3840": "2160", "692": "480", "1024": "576"}
-    acceptedHeights = ['576', '480', '360', '240', '720', '1080', '1440', '2160']
-    if width in width_to_height_dict:
-        height = width_to_height_dict[width]
-        if height == "576" and "29" in frameRate:
-            logging.info("NTSC detected. Changed resolution to 480")
-            height = "480"
-        return f"{str(height)}p"
-
-    if height is not None and height in acceptedHeights:
-        return f"{str(height)}p"
-
-    print(f"Width: {width}p\nHeight: {height}p")
-    return input("Resolution could not be found. Please input the resolution manually (e.g. 1080p, 2160p, 720p)\n")
-
-
-def copy_folder_structure(src_path, dst_path):
-    # Create the destination folder if it doesn't exist
-    if not os.path.exists(dst_path):
-        os.makedirs(dst_path)
-
-    # Iterate over all the files and folders in the source path
-    for item in os.listdir(src_path):
-        src_item_path = os.path.join(src_path, item)
-        dst_item_path = os.path.join(dst_path, item)
-        # If the item is a file, hardlink it to the destination
-        if os.path.isfile(src_item_path):
-            try:
-                os.link(src_item_path, dst_item_path)
-            except FileExistsError:
-                continue
-        # If the item is a folder, recursively copy its contents
-        elif os.path.isdir(src_item_path):
-            copy_folder_structure(src_item_path, dst_item_path)
-
-
-def getUserInput(question: str):
-    question = question + " [y, n]"
-    Userinput = None
-    while Userinput not in ["y", "yes", "n", "no"]:
-        # notifyTaskbarIcon()
-        Userinput = input(question)
-        if Userinput in ["y", "yes"]:
-            return True
-        if Userinput in ["n", "no"]:
-            return False
-        logging.warning("Given input is not valid. Must be one of [y,n]\n")
-
-
-def delete_if_no_torrent(dirpath):
-    # Runs through contents of a directory, and deletes directory if there's no .torrent files.
-    # Returns true if directory was deleted, false otherwise
-    # Use os.listdir() to get the list of files in the directory
-    files = os.listdir(dirpath)
-    # Check if there are any .torrent files in the list
-    if not any(f.endswith('.torrent') for f in files):
-        # If no .torrent files are found, delete the directory
-        shutil.rmtree(dirpath)
-        return True
-    return False
-
-
-def get_season(filename: str):
-    # Use a regex to match the season string
-    match = re.search(r'S\d\d', filename.upper())
-    if match:
-        # If a match is found, return the season string
-        return match.group(0)
-    else:
-        # If no match is found, return an empty string
-        return input('Season number was not found. Please input in the format S00\n')
-
-
-def get_language_name(language_code):
-    try:
-        # Create a Locale instance with the given language code
-        locale = Locale(language_code)
-        # Return the language name in english
-        return locale.get_display_name('en')
-    except Exception:
-        # If the language code is invalid or the name cannot be determined, return an empty string
-        return ''
-
-
-def folders_in(path_to_parent):
-    for fname in os.listdir(path_to_parent):
-        if os.path.isdir(os.path.join(path_to_parent, fname)):
-            yield os.path.join(path_to_parent, fname)
-
-
-def has_folders(path_to_parent):
-    folders = list(folders_in(path_to_parent))
-    return len(folders) != 0
-
-
-def cb(torrent, filepath, pieces_done, pieces_total):
-    print(f'{pieces_done/pieces_total*100:3.0f} % done', end="\r")
-
-
-def FileOrFolder(path: str):
-    # returns 1 if file, 2 if folder, 0 if neither
-    if os.path.isfile(path):
-        return 1
-    elif os.path.isdir(path):
-        return 2
-    else:
-        return 0
-
-
-def getInfoDump(filePath: str, runDir: str):
-    output = MediaInfo.parse(filename=filePath, output="", full=False)
-    logging.debug(output)
-    # don't ask, the output looks fine in the terminal, but writing it
-    # to a file adds empty lines every second line. This deletes them
-    logging.info("Creating mediainfo dump at " + runDir + DUMPFILE)
-    with open(runDir + DUMPFILE, "w", encoding='utf-8') as f:
-        f.write(output)
-    with open(runDir + DUMPFILE, "r", encoding='utf-8') as fi:
-        # Get the lines from the file
-        lines = fi.readlines()
-
-        # Create an empty list to store the modified lines
-        new_lines = []
-
-        # Iterate over the lines in the file
-        for i, line in enumerate(lines):
-            # Check if the line number is even
-            if i % 2 == 0:
-                # If the line number is even, add the line to the new list
-                new_lines.append(line)
-
-    # Open the file in write mode
-    with open(runDir + DUMPFILE, 'w', encoding='utf-8') as fo:
-        # Write the modified lines to the file
-        for line in new_lines:
-            fo.write(line)
-    # Create a new mediainfo dump in JSON for parsing later
-    output = MediaInfo.parse(filename=filePath, output="JSON", full=False)
-    return output
-
 
 if __name__ == "__main__":
     main()

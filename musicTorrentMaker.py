@@ -28,10 +28,8 @@ from ftplib import FTP_TLS
 from tqdm import tqdm
 from concurrent import futures
 
-
-# Script to automate uploading music to RED
-
-from torrentmaker import has_folders, cb, uploadToPTPIMG, SEEDING_DIR, copy_folder_structure, getUserInput, qbitInject
+from torrent_utils.helpers import has_folders, cb, uploadToPTPIMG, copy_folder_structure, getUserInput, qbitInject
+from torrent_utils.config_loader import load_settings, validate_settings
 
 __VERSION = "1.0.0"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
@@ -138,31 +136,44 @@ def main():
     logging.basicConfig(datefmt=LOG_DATE_FORMAT, format=LOG_FORMAT, level=level)
     logging.info(f"Version {__VERSION} starting...")
 
-    if not os.path.exists('settings.ini'):
-        logging.info("No settings.ini file found. Generating...")
-        config = configparser.ConfigParser()
+    # --- Load and Validate Settings ---
+    settings = load_settings()
+    
+    required_settings = []
+    if arg.upload:
+        required_settings.extend(['RED_API', 'RED_URL', 'PTPIMG_API'])
+    if arg.inject:
+        required_settings.extend(['QBIT_HOST', 'QBIT_USERNAME', 'QBIT_PASSWORD'])
+    if arg.sbcopy:
+        required_settings.extend([
+            'SEEDBOX_HOST', 'SEEDBOX_PORT', 'SEEDBOX_FTP_USER', 'SEEDBOX_FTP_PASSWORD',
+            'SEEDBOX_QBIT_HOST', 'SEEDBOX_QBIT_USER', 'SEEDBOX_QBIT_PASSWORD'
+        ])
+    # All music torrents need a seeding dir for hardlinking
+    required_settings.append('SEEDING_DIR')
 
-        config['DEFAULT'] = {
-            'IMGBB_API': '',
-            'QBIT_USERNAME': '',
-            'QBIT_PASSWORD': '',
-            'QBIT_HOST': '',
-            'PTPIMG_API': '',
-            'RED_URL': '',
-            'RED_API': '',
-            'SEEDBOX_HOST': '',
-            'SEEDBOX_PORT': '',
-            'SEEDBOX_FTP_USER': '',
-            'SEEDBOX_FTP_PASSWORD': '',
-            'SEEDBOX_QBIT_HOST': '',
-            'SEEDBOX_QBIT_PASSWORD': '',
-            'SEEDBOX_QBIT_USER': '',
-        }
 
-        with open('settings.ini', 'w') as configfile:
-            config.write(configfile)
+    validate_settings(settings, required_settings)
+    
+    # Assign settings to variables to maintain original script structure
+    qbit_username = settings.get('QBIT_USERNAME')
+    qbit_password = settings.get('QBIT_PASSWORD')
+    qbit_host = settings.get('QBIT_HOST')
+    ptpimg_api = settings.get('PTPIMG_API')
+    red_url = settings.get('RED_URL')
+    red_api = settings.get('RED_API')
+    seedbox_host = settings.get('SEEDBOX_HOST')
+    seedbox_port = settings.getint('SEEDBOX_PORT') if settings.get('SEEDBOX_PORT') else 0
+    seedbox_qbit_host = settings.get('SEEDBOX_QBIT_HOST')
+    seedbox_qbit_user = settings.get('SEEDBOX_QBIT_USER')
+    seedbox_qbit_password = settings.get('SEEDBOX_QBIT_PASSWORD')
+    seedbox_ftp_user = settings.get('SEEDBOX_FTP_USER')
+    seedbox_ftp_password = settings.get('SEEDBOX_FTP_PASSWORD')
+    seeding_dir = settings.get('SEEDING_DIR')
 
-        sys.exit("settings.ini file generated. Please fill out before running again")
+    if ptpimg_api == '':
+        ptpimg_api = None
+    # --- END Settings Section ---
 
     pathList = []
     if not arg.path:
@@ -185,24 +196,6 @@ def main():
         pathList.append(arg.path)
 
     pathList.sort()
-    # Load the INI file
-    config = configparser.ConfigParser()
-    config.read('settings.ini')
-    qbit_username = config['DEFAULT']['QBIT_USERNAME']
-    qbit_password = config['DEFAULT']['QBIT_PASSWORD']
-    qbit_host = config['DEFAULT']['QBIT_HOST']
-    ptpimg_api = config['DEFAULT']['PTPIMG_API']
-    red_url = config['DEFAULT']['RED_URL']
-    red_api = config['DEFAULT']['RED_API']
-    seedbox_host = config['DEFAULT']['SEEDBOX_HOST']
-    seedbox_port = int(config['DEFAULT']['SEEDBOX_PORT'])
-    seedbox_qbit_host = config['DEFAULT']['SEEDBOX_QBIT_HOST']
-    seedbox_qbit_user = config['DEFAULT']['SEEDBOX_QBIT_USER']
-    seedbox_qbit_password = config['DEFAULT']['SEEDBOX_QBIT_PASSWORD']
-    seedbox_ftp_user = config['DEFAULT']['SEEDBOX_FTP_USER']
-    seedbox_ftp_password = config['DEFAULT']['SEEDBOX_FTP_PASSWORD']
-    if ptpimg_api == '':
-        ptpimg_api = None
 
     # Initialise musicbrainz agent
     mb.set_useragent("My Music App", "1.0", "https://www.example.com")
@@ -235,19 +228,19 @@ def main():
             if musicBrainzAlbumInfo:
                 similarityPercent = similarity(musicBrainzAlbumInfo['release-group']['title'], album)
                 logging.info("Similarity between album names: " + str(similarityPercent))
-                input = False
+                input_response = False
                 if similarityPercent < 90 and not arg.skipPrompts:
-                    input = getUserInput(f"The two found albums aren't similar enough. Are these equal?\n'{musicBrainzAlbumInfo['release-group']['title']}', '{album}'")
-                if input or musicBrainzAlbumInfo['release-group']['title'] == album:
+                    input_response = getUserInput(f"The two found albums aren't similar enough. Are these equal?\n'{musicBrainzAlbumInfo['release-group']['title']}', '{album}'")
+                if input_response or musicBrainzAlbumInfo['release-group']['title'] == album:
                     releaseGroupID = musicBrainzAlbumInfo['release-group']['id']
                 else:
                     releaseGroupID = None
             else:
                 releaseGroupID = None
-                input = None
+                input_response = None
 
             releaseForm = None
-            if input:
+            if input_response:
                 if 'type' in musicBrainzAlbumInfo['release-group']:
                     releaseForm = musicBrainzAlbumInfo['release-group']['type']
                     if musicBrainzAlbumInfo['release-group'] == 'Other':
@@ -265,9 +258,6 @@ def main():
             fileList = os.listdir("runs")
             maxValue = max(int(dirname) for dirname in fileList)
             logging.info("Last run number found: " + str(maxValue))
-            # if not delete_if_no_torrent(os.getcwd() + os.sep + "runs" + os.sep + str(maxValue).zfill(3)):
-            #     maxValue = maxValue + 1
-            #     logging.info("Found directory does not have finished .torrent file. Directory Deleted.")
             maxValue = maxValue + 1
             maxValue = str(maxValue).zfill(3)
             while True:
@@ -343,19 +333,19 @@ def main():
         torrent.private = True
         torrent.source = "RED"
         torrent.path = path
-        torrent.trackers = red_url
+        torrent.trackers.append(red_url)
         torrentFileName = os.path.basename(path).strip() + ".torrent"
         head, tail = os.path.split(path)
         headBasename = os.path.basename(head)
         postName = os.path.basename(path)
-        if head != SEEDING_DIR:
+        if head != seeding_dir:
             logging.info("Attempting to create hardlinks for easy seeding...")
-            destination = os.path.join(SEEDING_DIR, postName.strip())
+            destination = os.path.join(seeding_dir, postName.strip())
             copy_folder_structure(path, destination)
             logging.info("Hardlinks created at " + destination)
             torrent.path = destination
         logging.info("Generating torrent file hash. This will take a long while...")
-        success = torrent.generate(callback=cb, interval=0.25)
+        torrent.generate(callback=cb, interval=0.25)
         logging.info("Writing torrent file to disk...")
         torrent.write(runDir + torrentFileName)
         logging.info("Torrent file wrote to " + torrentFileName)

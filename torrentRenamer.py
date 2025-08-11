@@ -12,7 +12,8 @@ import requests
 from pprint import pformat
 from datetime import datetime
 
-from torrentmaker import get_tmdb_id, getInfoDump, getUserInput, get_season, get_episode, getResolution, get_audio_info
+from torrent_utils.helpers import get_tmdb_id, getInfoDump, getUserInput, get_season, get_episode, getResolution, get_audio_info
+from torrent_utils.config_loader import load_settings, validate_settings
 
 __VERSION = "1.0.0"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
@@ -75,39 +76,16 @@ def main():
     logging.basicConfig(datefmt=LOG_DATE_FORMAT, format=LOG_FORMAT, level=level)
     logging.info(f"Version {__VERSION} starting...")
 
-    if not os.path.exists('settings.ini'):
-        logging.info("No settings.ini file found. Generating...")
-        config = configparser.ConfigParser()
-
-        config['DEFAULT'] = {
-            'HUNO_API': '',
-            'TMDB_API': '',
-            'IMGBB_API': '',
-            'QBIT_USERNAME': '',
-            'QBIT_PASSWORD': '',
-            'QBIT_HOST': '',
-            'HUNO_URL': '',
-            'PTPIMG_API': ''
-        }
-
-        with open('settings.ini', 'w') as configfile:
-            config.write(configfile)
-
-        sys.exit("settings.ini file generated. Please fill out before running again")
-
-    # Load the INI file
-    config = configparser.ConfigParser()
-    config.read('settings.ini')
-    huno_api = config['DEFAULT']['HUNO_API']
-    tmdb_api = config['DEFAULT']['TMDB_API']
-    imgbb_api = config['DEFAULT']['IMGBB_API']
-    qbit_username = config['DEFAULT']['QBIT_USERNAME']
-    qbit_password = config['DEFAULT']['QBIT_PASSWORD']
-    qbit_host = config['DEFAULT']['QBIT_HOST']
-    huno_url = config['DEFAULT']['HUNO_URL']
-    ptpimg_api = config['DEFAULT']['PTPIMG_API']
-    if ptpimg_api == '':
-        ptpimg_api = None
+    # --- Load and Validate Settings ---
+    settings = load_settings()
+    
+    # This script only needs TMDB_API to function
+    required_settings = ['TMDB_API']
+    validate_settings(settings, required_settings)
+    
+    # Assign settings to variables to maintain original script structure
+    tmdb_api = settings.get('TMDB_API')
+    # --- END Settings Section ---
 
     pathList = []
     if arg.path is None:
