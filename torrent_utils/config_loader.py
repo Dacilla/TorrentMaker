@@ -63,8 +63,9 @@ def load_settings():
     user_config = configparser.ConfigParser()
     user_config.read(SETTINGS_FILE)
 
-    master_keys = set(k for k in CONFIG_STRUCTURE['DEFAULT'].keys() if not k.startswith('#'))
-    user_keys = set(user_config['DEFAULT'].keys())
+    # Only compare actual setting keys, not comment keys (case-insensitive comparison)
+    master_keys = set(k.lower() for k in CONFIG_STRUCTURE['DEFAULT'].keys() if not k.startswith('#'))
+    user_keys = set(k.lower() for k in user_config['DEFAULT'].keys() if not k.startswith('#'))
 
     # If all keys are present, no need to update the file
     if master_keys.issubset(user_keys):
@@ -72,16 +73,23 @@ def load_settings():
 
     # If keys are missing, rebuild the file while preserving user values
     missing_keys = master_keys - user_keys
-    logging.info(f"Updating settings.ini with missing fields: {', '.join(missing_keys)}")
+    if missing_keys:
+        # Convert back to original case for display
+        original_missing = [k for k in CONFIG_STRUCTURE['DEFAULT'].keys() 
+                           if not k.startswith('#') and k.lower() in missing_keys]
+        logging.info(f"Updating settings.ini with missing fields: {', '.join(original_missing)}")
 
     # Create a new config object from the master template to ensure correct order and comments
     updated_config = configparser.ConfigParser()
     updated_config.read_dict(CONFIG_STRUCTURE)
 
-    # Copy the user's existing values into our new, complete config object
+    # Copy the user's existing values into our new, complete config object (case-insensitive)
     for key, value in user_config['DEFAULT'].items():
-        if updated_config.has_option('DEFAULT', key):
-            updated_config.set('DEFAULT', key, value)
+        # Find matching key in master config (case-insensitive)
+        for master_key in CONFIG_STRUCTURE['DEFAULT'].keys():
+            if master_key.lower() == key.lower() and updated_config.has_option('DEFAULT', master_key):
+                updated_config.set('DEFAULT', master_key, value)
+                break
 
     # Write the updated, complete config back to the file
     with open(SETTINGS_FILE, 'w') as configfile:

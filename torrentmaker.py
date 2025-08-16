@@ -16,7 +16,12 @@ import guessit
 import ctypes
 import Levenshtein
 import numpy as np
+import concurrent.futures
+import time
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image
+from pprint import pprint
 from pprint import pformat
 from base64 import b64encode
 from pymediainfo import MediaInfo
@@ -354,135 +359,83 @@ def main():
         mediaDescription = tmdbData['overview']
 
     logging.info("Making screenshots...")
-    if not os.path.isdir(runDir + "screenshots"):
-        os.mkdir(runDir + "screenshots")
-    else:
-        data = os.listdir(runDir + "screenshots")
-        for i in data:
-            os.remove(runDir + "screenshots" + os.sep + i)
+    # Create optimized screenshots
+    screenshot_success = create_optimized_screenshots(videoFile, runDir)
+    
+    if not screenshot_success:
+        logging.error("Failed to create screenshots. Continuing without uploads...")
+        arg.upload = False  # Disable upload if no screenshots
 
-    video = cv2.VideoCapture(videoFile)
-    # Get the total duration of the video in seconds
-    total_duration = int(video.get(cv2.CAP_PROP_FRAME_COUNT)) / int(video.get(cv2.CAP_PROP_FPS))
-
-    # Define the timestamps for the screenshots
-    timestamps = [i * total_duration / 10 for i in range(10)]
-    # remove the first and last items from the list so we don't get totally black screenshots and/or screenshots of the first and last frames
-    timestamps.pop(0)
-    timestamps.pop(-1)
-
-    # Iterate over the timestamps and create a screenshot at each timestamp
-    for timestamp in timestamps:
-        while True:
-            # Set the video position to the timestamp
-            video.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-            # Read the frame at the current position
-            success, image = video.read()
-            if success:
-                # Save the image to a temporary file
-                temp_image_path = runDir + f"screenshots{os.sep}" + "temp_screenshot.png"
-                cv2.imwrite(temp_image_path, image)
-
-                # Check the size of the image
-                image_size_kb = os.path.getsize(temp_image_path) / 1024
-
-                if image_size_kb < 100:
-                    # Delete the small image
-                    os.remove(temp_image_path)
-                    # Move the timestamp one second along
-                    timestamp += 1
-                else:
-                    # Save the image with the correct filename
-                    os.rename(temp_image_path, runDir + f"screenshots{os.sep}" + "screenshot_{}.png".format(timestamp))
-                    logging.info(f"Screenshot made at {runDir}screenshots{os.sep}" + "screenshot_{}.png".format(timestamp))
-                    break  # Break the loop if the image is of sufficient size
-            else:
-                break  # Break the loop if we can't read the frame
-
-    video.release()
-    if arg.upload:
-        if (arg.throttle and arg.upload):
-            if qbit_username != "" and qbit_password != "":
-                logging.info("Attempting to enable qbit upload speed limit")
-                logging.info("Logging in to qbit...")
-                try:
-                    qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, REQUESTS_ARGS={'timeout': (60, 60)})
-                    transfer_info = qb.transfer_info()
-                    uniqueUploadLimit = random.randint(900000, 1000000)
-                    if qb.transfer_upload_limit() == 0:
-                        qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
-                        uploadLimitEnabled = True
-                        uniqueUploadLimit = qb.transfer_upload_limit()
-                        logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
-                    elif 900000 <= qb.transfer_upload_limit() <= 1000000:
-                        logging.info("Another instance of this script has already changed the upload limit. Overwriting...")
-                        qb.transfer_set_upload_limit(limit=uniqueUploadLimit)
-                        uploadLimitEnabled = True
-                        uniqueUploadLimit = qb.transfer_upload_limit()
-                        logging.info("Qbit upload limit set to 1MB/s. Will disable once screenshots have been uploaded.")
-                    else:
-                        logging.info("Qbit upload limit already exists. Continuing...")
-                        uploadLimitEnabled = False
-                except qbittorrentapi.APIConnectionError:
-                    logging.error("Failed to connect to Qbit API. Continuing anyway...")
-        logging.info("Uploading screenshots to imgbb")
-        images = os.listdir(f"{runDir}screenshots{os.sep}")
-        logging.info("Screenshots loaded...")
-        imgbb_brokey = False
-        ptpimg_brokey = False
-        for image in images:
-            logging.info(f"Uploading {image}")
-            image_url = None
-            # Open the file and read the data
-            filePath = runDir + "screenshots" + os.sep + image
-            if not imgbb_brokey:
-                image_url, image_url_viewer = upload_to_imgbb(file_path=filePath, apiKey=imgbb_api)
-                if image_url is None or image_url_viewer is None:
-                    imgbb_brokey = True
-            if ptpimg_api and not ptpimg_brokey:
-                logging.info("PTPImg API exists. Attempting to upload there...")
-                image_url = uploadToPTPIMG(filePath, ptpimg_api)
-                if not image_url:
-                    ptpimg_brokey = True
-            if ptpimg_brokey and imgbb_brokey:
-                logging.info("Attempting to upload to catbox...")
-                image_url = upload_to_catbox(file_path=filePath, user_hash=catbox_hash)
-                if not image_url:
-                    logging.error("Uploading to catbox failed. Exiting..")
-                    exit(-1)
-            logging.debug(image_url)
+    # Handle screenshot uploads
+    if arg.upload and screenshot_success:
+        # Set up qBittorrent throttling if requested
+        upload_limit_enabled = False
+        unique_upload_limit = None
+        
+        if arg.throttle and qbit_username and qbit_password:
+            logging.info("Setting up qBittorrent upload throttling...")
             try:
-                if not imgbb_brokey:
-                    # Print the image URL
-                    # Template: [url=https://ibb.co/0fbvMqH][img]https://i.ibb.co/0fbvMqH/screenshot-785-895652173913.png[/img][/url]
-                    bbcode = f"[url={image_url_viewer}][img]{image_url}[/img][/url]"
+                qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, 
+                                         REQUESTS_ARGS={'timeout': (60, 60)})
+                
+                import random
+                unique_upload_limit = random.randint(900000, 1000000)
+                current_limit = qb.transfer_upload_limit()
+                
+                if current_limit == 0:
+                    qb.transfer_set_upload_limit(limit=unique_upload_limit)
+                    upload_limit_enabled = True
+                    logging.info("qBit upload limit set to ~1MB/s during screenshot upload")
+                elif 900000 <= current_limit <= 1000000:
+                    logging.info("Another instance detected. Overwriting upload limit...")
+                    qb.transfer_set_upload_limit(limit=unique_upload_limit)
+                    upload_limit_enabled = True
                 else:
-                    bbcode = f"[url={image_url}][img]{image_url}[/img][/url]"
-                with open(runDir + "showDesc.txt", "a") as fileAdd:
-                    fileAdd.write("[center]" + bbcode + "[/center]\n")
-                logging.info(f"bbcode for image URL {image_url} added to showDesc.txt")
+                    logging.info("qBit upload limit already exists. Continuing...")
+                    upload_limit_enabled = False
+                    
             except Exception as e:
-                logging.critical("Unexpected Exception: " + str(e))
-                continue
-        if arg.throttle:
-            logging.info("Attempting to disable qbit upload speed limit")
-            logging.info("Logging in to qbit...")
+                logging.warning(f"Failed to set qBit throttling: {e}")
+                upload_limit_enabled = False
+
+        # Upload screenshots concurrently
+        logging.info("Starting concurrent screenshot upload...")
+        start_time = time.time()
+        
+        bbcodes = upload_screenshots_concurrently(
+            screenshot_dir=os.path.join(runDir, "screenshots"),
+            imgbb_api=imgbb_api,
+            ptpimg_api=ptpimg_api,
+            catbox_hash=catbox_hash,
+            max_workers=5  # Adjust this based on your connection speed
+        )
+        
+        upload_time = time.time() - start_time
+        logging.info(f"Screenshot upload completed in {upload_time:.1f} seconds")
+        
+        # Write BBCodes to file
+        if bbcodes:
+            with open(os.path.join(runDir, "showDesc.txt"), "w", encoding='utf-8') as desc_file:
+                for bbcode in bbcodes:
+                    desc_file.write(f"[center]{bbcode}[/center]\n")
+            logging.info(f"✓ BBCode written to showDesc.txt ({len(bbcodes)} images)")
+        else:
+            logging.warning("No screenshots were successfully uploaded!")
+        
+        # Disable qBittorrent throttling
+        if upload_limit_enabled and arg.throttle:
             try:
-                qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, REQUESTS_ARGS={'timeout': (60, 60)})
-                transfer_info = qb.transfer_info()
-                logging.info("Qbit upload limit: " + str(qb.transfer_upload_limit()))
-                logging.info("Comparing to: " + str(uniqueUploadLimit))
-                if qb.transfer_upload_limit() == uniqueUploadLimit:
+                qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password,
+                                         REQUESTS_ARGS={'timeout': (60, 60)})
+                
+                if qb.transfer_upload_limit() == unique_upload_limit:
                     qb.transfer_set_upload_limit(limit=0)
-                    uploadLimitEnabled = False
-                    logging.info("Qbit upload limit successfully disabled.")
+                    logging.info("✓ qBit upload limit disabled")
                 else:
-                    logging.info("Qbit upload limit has already been changed. Continuing...")
-                    uploadLimitEnabled = True
-            except qbittorrentapi.APIConnectionError:
-                logging.error("Failed to connect to Qbit API. Continuing anyway...")
-            except UnboundLocalError:
-                logging.error("Failed to find uniqueUploadLimit. Continuing anyway...")
+                    logging.info("Upload limit was changed externally, leaving as-is")
+                    
+            except Exception as e:
+                logging.warning(f"Failed to disable qBit throttling: {e}")
 
     logging.info("Creating torrent file")
     torrent = torf.Torrent()
@@ -896,6 +849,200 @@ def upload_to_catbox(file_path, user_hash=None):
     except Exception as e:
         logging.error(f"Error occurred: {e}\nResponse data: {response.content}")
         return None
+
+def optimize_screenshot(input_path, output_path=None, max_width=1920, quality=85):
+    """
+    Optimize screenshot for faster upload while maintaining good quality
+    """
+    if output_path is None:
+        output_path = input_path
+        
+    try:
+        with Image.open(input_path) as img:
+            # Convert to RGB if necessary (some screenshots might be RGBA)
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGB')
+            
+            # Resize if too large
+            if img.width > max_width:
+                ratio = max_width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+                logging.info(f"Resized screenshot from {img.width}x{img.height} to {max_width}x{new_height}")
+            
+            # Save with optimized settings
+            img.save(output_path, 'JPEG', quality=quality, optimize=True)
+            
+        return output_path
+    except Exception as e:
+        logging.error(f"Failed to optimize screenshot {input_path}: {e}")
+        return input_path  # Return original if optimization fails
+
+def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash):
+    """Upload a single screenshot and return the bbcode"""
+    image_name = os.path.basename(image_path)
+    logging.info(f"Uploading {image_name}")
+    
+    # Try imgbb first
+    if imgbb_api:
+        try:
+            image_url, image_url_viewer = upload_to_imgbb(image_path, imgbb_api)
+            if image_url and image_url_viewer:
+                bbcode = f"[url={image_url_viewer}][img]{image_url}[/img][/url]"
+                logging.info(f"✓ Successfully uploaded {image_name} to imgbb")
+                return bbcode
+        except Exception as e:
+            logging.warning(f"ImgBB upload failed for {image_name}: {e}")
+    
+    # Try ptpimg if imgbb failed or unavailable
+    if ptpimg_api:
+        try:
+            image_url = uploadToPTPIMG(image_path, ptpimg_api)
+            if image_url:
+                bbcode = f"[url={image_url}][img]{image_url}[/img][/url]"
+                logging.info(f"✓ Successfully uploaded {image_name} to ptpimg")
+                return bbcode
+        except Exception as e:
+            logging.warning(f"PTPIMG upload failed for {image_name}: {e}")
+    
+    # Try catbox as last resort
+    try:
+        image_url = upload_to_catbox(image_path, catbox_hash)
+        if image_url and not image_url.startswith("Upload failed"):
+            bbcode = f"[url={image_url}][img]{image_url}[/img][/url]"
+            logging.info(f"✓ Successfully uploaded {image_name} to catbox")
+            return bbcode
+    except Exception as e:
+        logging.error(f"Catbox upload failed for {image_name}: {e}")
+    
+    logging.error(f"✗ All upload methods failed for {image_name}")
+    return None
+
+def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbox_hash, max_workers=5):
+    """Upload all screenshots concurrently"""
+    # Get all image files (both PNG and JPG)
+    all_files = os.listdir(screenshot_dir)
+    images = [f for f in all_files if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    images.sort()  # Ensure consistent ordering
+    
+    if not images:
+        logging.warning("No screenshots found to upload!")
+        return []
+    
+    image_paths = [os.path.join(screenshot_dir, img) for img in images]
+    
+    bbcodes = []
+    failed_uploads = []
+    
+    logging.info(f"Starting concurrent upload of {len(images)} screenshots with {max_workers} workers...")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all upload tasks
+        future_to_info = {}
+        for i, path in enumerate(image_paths):
+            future = executor.submit(upload_single_screenshot, path, imgbb_api, ptpimg_api, catbox_hash)
+            future_to_info[future] = {'path': path, 'index': i, 'name': os.path.basename(path)}
+        
+        # Collect results as they complete
+        completed = 0
+        results = {}  # Store results with their original index to maintain order
+        
+        for future in as_completed(future_to_info):
+            info = future_to_info[future]
+            completed += 1
+            
+            try:
+                bbcode = future.result(timeout=120)  # 2 minute timeout per upload
+                if bbcode:
+                    results[info['index']] = bbcode
+                    logging.info(f"Progress: {completed}/{len(images)} - {info['name']} uploaded successfully")
+                else:
+                    failed_uploads.append(info['path'])
+                    logging.warning(f"Progress: {completed}/{len(images)} - {info['name']} failed")
+            except Exception as e:
+                logging.error(f"Upload task failed for {info['name']}: {e}")
+                failed_uploads.append(info['path'])
+        
+        # Convert results dict to ordered list
+        for i in sorted(results.keys()):
+            bbcodes.append(results[i])
+    
+    if failed_uploads:
+        logging.warning(f"Failed to upload {len(failed_uploads)} screenshots")
+    
+    logging.info(f"✓ Successfully uploaded {len(bbcodes)} out of {len(images)} screenshots")
+    return bbcodes
+
+def create_optimized_screenshots(videoFile, runDir):
+    """
+    Create and optimize screenshots for faster upload
+    """
+    logging.info("Making optimized screenshots...")
+    screenshots_dir = os.path.join(runDir, "screenshots")
+    
+    if not os.path.isdir(screenshots_dir):
+        os.mkdir(screenshots_dir)
+    else:
+        # Clean existing screenshots
+        for file in os.listdir(screenshots_dir):
+            os.remove(os.path.join(screenshots_dir, file))
+
+    video = cv2.VideoCapture(videoFile)
+    
+    # Get the total duration of the video in seconds
+    total_duration = int(video.get(cv2.CAP_PROP_FRAME_COUNT)) / int(video.get(cv2.CAP_PROP_FPS))
+
+    # Define the timestamps for the screenshots (same as before)
+    timestamps = [i * total_duration / 10 for i in range(10)]
+    timestamps.pop(0)  # Remove first timestamp
+    timestamps.pop(-1)  # Remove last timestamp
+
+    successful_screenshots = 0
+    
+    for i, timestamp in enumerate(timestamps):
+        attempts = 0
+        max_attempts = 5
+        
+        while attempts < max_attempts:
+            video.set(cv2.CAP_PROP_POS_MSEC, (timestamp + attempts) * 1000)
+            success, image = video.read()
+            
+            if success:
+                # Save as temporary PNG first
+                temp_png = os.path.join(screenshots_dir, f"temp_{i:02d}.png")
+                cv2.imwrite(temp_png, image)
+                
+                # Check if image is too small (likely black frame)
+                if os.path.getsize(temp_png) / 1024 < 100:
+                    os.remove(temp_png)
+                    attempts += 1
+                    continue
+                
+                # Optimize and save as JPEG
+                final_path = os.path.join(screenshots_dir, f"screenshot_{i:02d}.jpg")
+                optimized_path = optimize_screenshot(temp_png, final_path, max_width=1920, quality=85)
+                
+                # Remove temp PNG
+                if os.path.exists(temp_png):
+                    os.remove(temp_png)
+                
+                # Log file size reduction
+                original_size = os.path.getsize(temp_png) if os.path.exists(temp_png) else 0
+                optimized_size = os.path.getsize(optimized_path)
+                
+                logging.info(f"Screenshot {i+1}/{len(timestamps)} created: {os.path.basename(optimized_path)} "
+                          f"({optimized_size/1024:.1f}KB)")
+                successful_screenshots += 1
+                break
+            else:
+                attempts += 1
+        
+        if attempts >= max_attempts:
+            logging.warning(f"Failed to create screenshot {i+1} after {max_attempts} attempts")
+
+    video.release()
+    logging.info(f"Created {successful_screenshots} optimized screenshots")
+    return successful_screenshots > 0
 
 if __name__ == "__main__":
     main()

@@ -106,6 +106,33 @@ def ensure_mediainfo_cli():
     logging.info("Package manager installation failed or was skipped. Falling back to local download.")
     download_mediainfo()
 
+def get_video_codec(mediaInfo, filename, source):
+    """Determines the video codec based on MediaInfo and filename."""
+    video_track = next((t for t in mediaInfo['media']['track'] if t['@type'] == 'Video'), {})
+    file_lower = filename.lower()
+    source_lower = source.lower()
+    
+    video_format = video_track.get('Format', '')
+
+    if 'AV1' in video_format:
+        return "AV1"
+    elif 'HEVC' in video_format:
+        if 'remux' in source_lower:
+            return 'HEVC'
+        elif 'h265' in file_lower or 'hevc' in file_lower:
+            return 'H265'
+        else:
+            return "x265"
+    elif "VC-1" in video_format:
+        return "VC-1"
+    elif "V_MPEG2" in video_track.get('CodecID', ''):
+        return "MPEG-2"
+    elif 'remux' in source_lower:
+        return "AVC"
+    elif 'x264' in file_lower:
+        return "x264"
+    else:
+        return "H264"
 
 def get_tmdb_id(name, api_key, isMovie):
     """
