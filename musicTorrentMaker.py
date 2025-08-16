@@ -30,11 +30,11 @@ from concurrent import futures
 
 from torrent_utils.helpers import (
     has_folders, cb, uploadToPTPIMG, copy_folder_structure, 
-    getUserInput, qbitInject, similarity, get_path_list
+    getUserInput, qbitInject, similarity, get_path_list, ensure_flac_cli
 )
 from torrent_utils.config_loader import load_settings, validate_settings
 
-__VERSION = "1.1.0" # Incremented version
+__VERSION = "1.2.0" # Incremented version
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -124,6 +124,12 @@ def main():
         help="Enable to skip all user prompts. It won't try to match to musicbrainz, and it'll upload immediately"
     )
     parser.add_argument(
+        "--skip-flac-check",
+        action="store_true",
+        default=False,
+        help="Skip the check for the FLAC command-line tool."
+    )
+    parser.add_argument(
         "-D", "--debug", action="store_true", help="debug mode", default=False
     )
     parser.add_argument(
@@ -139,6 +145,10 @@ def main():
 
     logging.basicConfig(datefmt=LOG_DATE_FORMAT, format=LOG_FORMAT, level=level)
     logging.info(f"Version {__VERSION} starting...")
+    
+    # --- Ensure FLAC CLI is available if we need it ---
+    if arg.fixMD5 and not arg.skip_flac_check:
+        ensure_flac_cli()
 
     # --- Load and Validate Settings ---
     settings = load_settings()
@@ -189,7 +199,6 @@ def main():
     lastAlbumTitle = None
 
     for path in pathList:
-        # ... (The rest of the script logic remains the same)
         if not check_file_path_length(path):
             logging.info("A file path is too long in path: " + path)
             if arg.skipPrompts:
@@ -444,7 +453,7 @@ def main():
             else:
                 if not getUserInput("Upload failed. Continue anyway?"):
                     exit()
-# ... (rest of the functions are unchanged)
+
 def extract_album_art(folder_path):
     for root, dirs, files in os.walk(folder_path):
         for file in files:
@@ -482,7 +491,7 @@ def fixMD5(folder_path):
     command = ['flac', '-f8', '*.flac']
 
     # Use subprocess.Popen to execute the command and capture its output
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, shell=True)
 
     # Loop through the output and print each line as it is generated
     for line in process.stdout:

@@ -92,10 +92,13 @@ def install_mediainfo_with_package_manager():
     system = platform.system()
     if system == "Windows":
         if shutil.which("winget"):
-            if getUserInput("MediaInfo not found. Attempt to install it using winget? (This may require administrator privileges)"):
+            prompt = (
+                "MediaInfo is required to read technical data from media files for accurate torrent naming. "
+                "It was not found on your system. Attempt to install it now using winget? (This may require administrator privileges)"
+            )
+            if getUserInput(prompt):
                 try:
                     logging.info("Running: winget install MediaInfo.MediaInfo -e --accept-source-agreements --accept-package-agreements")
-                    # Using '-e' for exact match and agreements to reduce user interaction
                     subprocess.run(["winget", "install", "MediaInfo.MediaInfo", "-e", "--accept-source-agreements", "--accept-package-agreements"], check=True, shell=True)
                     if shutil.which("mediainfo"):
                         logging.info("MediaInfo installed successfully via winget.")
@@ -109,39 +112,161 @@ def install_mediainfo_with_package_manager():
         else:
             logging.info("Windows Package Manager (winget) not found.")
             return False
-    # Placeholder for other OSs
-    elif system == "Darwin": # macOS
-        logging.info("macOS detected, but Homebrew installation is not yet implemented.")
-        return False
-    elif system == "Linux":
-        logging.info("Linux detected, but package manager installation is not yet implemented.")
-        return False
     return False
 
 def ensure_mediainfo_cli():
     """
-    Checks if MediaInfo CLI is available. If not, attempts to install it
-    via a package manager, falling back to a local download.
+    Checks if MediaInfo CLI is available. If not, prompts the user to install it.
     """
-    # 1. Best case: Check if 'mediainfo' is in the system's PATH
-    if shutil.which("mediainfo"):
-        logging.info("MediaInfo CLI found in system PATH.")
+    if shutil.which("mediainfo") or os.path.exists(os.path.join("Mediainfo", "mediainfo.exe")):
+        logging.info("MediaInfo CLI found.")
         return
 
-    # 2. Second best case: Check for a local executable
-    local_mediainfo_path = os.path.join("Mediainfo", "mediainfo.exe")
-    if os.path.exists(local_mediainfo_path):
-        logging.info(f"MediaInfo CLI found locally at '{local_mediainfo_path}'.")
-        return
-
-    # 3. Attempt to install with a package manager
     logging.warning("MediaInfo CLI not found in PATH or locally.")
     if install_mediainfo_with_package_manager():
-        return # Success!
+        return
 
-    # 4. If all else fails, fall back to local download
-    logging.info("Package manager installation failed or was skipped. Falling back to local download.")
-    download_mediainfo()
+    logging.info("Package manager installation failed or was skipped.")
+    prompt = (
+        "As a last resort, the script can download and extract MediaInfo locally. "
+        "MediaInfo is required to read technical data from media files. Do you want to proceed with the local download?"
+    )
+    if getUserInput(prompt):
+        download_mediainfo()
+    else:
+        logging.error("MediaInfo is required to proceed. Exiting.")
+        sys.exit(1)
+
+def download_flac():
+    """Downloads and extracts the LATEST FLAC command-line tools."""
+    download_page_url = "https://ftp.osuosl.org/pub/xiph/releases/flac/"
+    latest_zip_filename = None
+    
+    try:
+        logging.info(f"Checking for the latest FLAC version at {download_page_url}...")
+        response = requests.get(download_page_url)
+        response.raise_for_status()
+        
+        win_zip_pattern = r'href="(flac-[\d\.]+-win\.zip)"'
+        found_files = re.findall(win_zip_pattern, response.text)
+        
+        if not found_files:
+            raise ValueError("No Windows FLAC zip files found on the download page.")
+            
+        latest_version_tuple = (0, 0, 0)
+        
+        for filename in found_files:
+            version_str_match = re.search(r'flac-([\d\.]+)-win\.zip', filename)
+            if version_str_match:
+                version_str = version_str_match.group(1)
+                current_version_tuple = tuple(map(int, version_str.split('.')))
+                
+                if current_version_tuple > latest_version_tuple:
+                    latest_version_tuple = current_version_tuple
+                    latest_zip_filename = filename
+                    
+        if not latest_zip_filename:
+             raise ValueError("Could not determine the latest FLAC version.")
+             
+        logging.info(f"Found latest FLAC version: {'.'.join(map(str, latest_version_tuple))}")
+        
+    except (requests.exceptions.RequestException, ValueError) as e:
+        logging.error(f"Could not automatically find the latest FLAC version: {e}")
+        logging.warning("Falling back to a known recent version.")
+        latest_zip_filename = "flac-1.4.3-win.zip"
+
+    url = f"https://ftp.osuosl.org/pub/xiph/releases/flac/{latest_zip_filename}"
+    destination_folder = "FLAC"
+    zip_path = "flac_temp.zip"
+
+    logging.info(f"Downloading FLAC tools from {url}...")
+    try:
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        with open(zip_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        logging.info(f"Unpacking to ./{destination_folder}/")
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            temp_extract_folder = "flac_temp_extract"
+            zip_ref.extractall(temp_extract_folder)
+            
+            extracted_dir_name = os.listdir(temp_extract_folder)[0]
+            source_dir = os.path.join(temp_extract_folder, extracted_dir_name)
+            
+            if os.path.exists(destination_folder):
+                shutil.rmtree(destination_folder)
+            shutil.move(source_dir, destination_folder)
+            
+            shutil.rmtree(temp_extract_folder)
+
+        logging.info("FLAC tools downloaded and unpacked successfully.")
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to download FLAC: {e}")
+        sys.exit("Could not download required dependency.")
+    except (zipfile.BadZipFile, IndexError) as e:
+        logging.error(f"Failed to unpack FLAC: {e}. The downloaded file may be corrupt.")
+        sys.exit("Could not unpack required dependency.")
+    finally:
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        if os.path.exists("flac_temp_extract"):
+            shutil.rmtree("flac_temp_extract")
+
+def install_flac_with_package_manager():
+    """Attempts to install FLAC using a detected package manager."""
+    if platform.system() == "Windows" and shutil.which("winget"):
+        prompt = (
+            "The FLAC command-line tool is required for the --fixMD5 feature. It was not found on your system. "
+            "Attempt to install it now using winget? (This may require administrator privileges)"
+        )
+        if getUserInput(prompt):
+            try:
+                logging.info("Running: winget install Xiph.Flac -e --accept-source-agreements --accept-package-agreements")
+                subprocess.run(["winget", "install", "Xiph.Flac", "-e", "--accept-source-agreements", "--accept-package-agreements"], check=True, shell=True)
+                if shutil.which("flac"):
+                    logging.info("FLAC installed successfully via winget.")
+                    return True
+                else:
+                    logging.error("Winget installation appeared to succeed, but 'flac' is still not in the PATH. You may need to restart your terminal.")
+                    return False
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                logging.error(f"Winget installation failed: {e}")
+                return False
+    return False
+
+def ensure_flac_cli():
+    """
+    Checks if FLAC CLI is available. If not, prompts the user to install it.
+    """
+    local_flac_path = os.path.join("FLAC", "win64", "flac.exe")
+    if shutil.which("flac"):
+        logging.info("FLAC CLI found in system PATH.")
+        return
+    if os.path.exists(local_flac_path):
+        logging.info(f"FLAC CLI found locally at '{local_flac_path}'.")
+        os.environ["PATH"] += os.pathsep + os.path.join(os.getcwd(), "FLAC", "win64")
+        return
+
+    logging.warning("FLAC CLI not found in PATH or locally.")
+    if install_flac_with_package_manager():
+        return
+
+    logging.info("Package manager installation failed or was skipped.")
+    prompt = (
+        "As a last resort, the script can download and extract the FLAC tools locally. "
+        "These are required for the --fixMD5 feature. Do you want to proceed with the local download?"
+    )
+    if getUserInput(prompt):
+        download_flac()
+        if os.path.exists(local_flac_path):
+            os.environ["PATH"] += os.pathsep + os.path.join(os.getcwd(), "FLAC", "win64")
+    else:
+        logging.error("FLAC CLI is required for the --fixMD5 feature. Exiting.")
+        sys.exit(1)
+
 
 def get_tmdb_id(name, api_key, isMovie):
     """
