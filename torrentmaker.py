@@ -33,11 +33,11 @@ from torrent_utils.HUNOInfo import bannedEncoders, encoderGroups
 from torrent_utils.helpers import (
     getInfoDump, getUserInput, has_folders, cb, uploadToPTPIMG, 
     copy_folder_structure, qbitInject, FileOrFolder, is_valid_torf_hash, 
-    convert_sha1_hash, ensure_mediainfo_cli, upload_to_catbox
+    convert_sha1_hash, ensure_mediainfo_cli, upload_to_catbox, upload_to_imgbb
 )
-from torrent_utils.media import Movie, TVShow # <-- Import our new classes
+from torrent_utils.media import Movie, TVShow
 
-__VERSION = "2.1.1" # Incremented version for the fix
+__VERSION = "2.1.3"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -299,7 +299,7 @@ def main():
             with open(os.path.join(runDir, "showDesc.txt"), "w", encoding='utf-8') as desc_file:
                 for bbcode in bbcodes:
                     desc_file.write(f"[center]{bbcode}[/center]\n")
-            logging.info(f"✓ BBCode written to showDesc.txt ({len(bbcodes)} images)")
+            logging.info(f"Success: BBCode written to showDesc.txt ({len(bbcodes)} images)")
 
     # --- Create Torrent File ---
     logging.info("Creating torrent file")
@@ -481,26 +481,29 @@ def optimize_screenshot(input_path, output_path, max_width=1920, quality=85):
 
 def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash):
     image_name = os.path.basename(image_path)
-    logging.info(f"Uploading {image_name}")
-    
-    # Try PTPImg first if available
+    logging.info(f"Uploading {image_name}...")
+
+    # --- Attempt 1: PTPImg (if API key is provided) ---
     if ptpimg_api:
-        try:
-            image_url = uploadToPTPIMG(image_path, ptpimg_api)
-            if image_url:
-                return f"[url={image_url}][img]{image_url}[/img][/url]"
-        except Exception as e:
-            logging.warning(f"PTPIMG upload failed for {image_name}: {e}")
-    
-    # Try Catbox
-    try:
-        image_url = upload_to_catbox(image_path, catbox_hash)
-        if image_url and not image_url.startswith("Upload failed"):
+        image_url = uploadToPTPIMG(image_path, ptpimg_api)
+        if image_url:
+            logging.info(f"Success: Successfully uploaded {image_name} to PTPImg.")
             return f"[url={image_url}][img]{image_url}[/img][/url]"
-    except Exception as e:
-        logging.error(f"Catbox upload failed for {image_name}: {e}")
     
-    logging.error(f"✗ All upload methods failed for {image_name}")
+    # --- Attempt 2: ImgBB (if API key is provided) ---
+    if imgbb_api:
+        image_url, _ = upload_to_imgbb(image_path, imgbb_api) # We only need the direct URL
+        if image_url:
+            logging.info(f"Success: Successfully uploaded {image_name} to ImgBB.")
+            return f"[url={image_url}][img]{image_url}[/img][/url]"
+
+    # --- Attempt 3: Catbox (fallback) ---
+    image_url = upload_to_catbox(image_path, catbox_hash)
+    if image_url:
+        logging.info(f"Success: Successfully uploaded {image_name} to Catbox.")
+        return f"[url={image_url}][img]{image_url}[/img][/url]"
+
+    logging.error(f"Failure: All upload methods failed for {image_name}.")
     return None
 
 def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbox_hash, max_workers=5):
@@ -524,7 +527,7 @@ def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbo
                 logging.error(f"Upload task failed for {image_paths[index]}: {e}")
     
     successful_uploads = [b for b in bbcodes if b]
-    logging.info(f"✓ Successfully uploaded {len(successful_uploads)} out of {len(images)} screenshots")
+    logging.info(f"Success: Successfully uploaded {len(successful_uploads)} out of {len(images)} screenshots")
     return successful_uploads
 
 if __name__ == "__main__":

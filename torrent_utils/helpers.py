@@ -65,7 +65,7 @@ def download_mediainfo():
 
     logging.info(f"Downloading MediaInfo CLI from {url}...")
     try:
-        response = requests.get(url, stream=True)
+        response = requests.get(url, stream=True, timeout=30)
         response.raise_for_status()
         with open(zip_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -144,7 +144,7 @@ def download_flac():
     
     try:
         logging.info(f"Checking for the latest FLAC version at {download_page_url}...")
-        response = requests.get(download_page_url)
+        response = requests.get(download_page_url, timeout=15)
         response.raise_for_status()
         
         win_zip_pattern = r'href="(flac-[\d\.]+-win\.zip)"'
@@ -181,7 +181,7 @@ def download_flac():
 
     logging.info(f"Downloading FLAC tools from {url}...")
     try:
-        response = requests.get(url, stream=True)
+        response = requests.get(url, stream=True, timeout=30)
         response.raise_for_status()
         with open(zip_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -280,35 +280,36 @@ def get_tmdb_id(name, api_key, isMovie):
     else:
         url = f'https://api.themoviedb.org/3/search/tv?query={name}&api_key={api_key}'
 
-    # Send a GET request to the API to search for the TV show or movie
-    response = requests.get(url)
-    tmdb_id = None
-    # Parse the response JSON to get the TMDB ID of the first result
-    logging.debug(json.dumps(response.json(), indent=4))
-    results = response.json()["results"]
-    if len(results) > 0:
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        
+        if not results:
+            return None
+
         for result in results:
             try:
                 if isMovie:
-                    logging.info(f"Comparing {name} to {result['original_title']}, ID {result['id']}")
-                    titleSimilarity = max(similarity(name, result['original_title']), similarity(name, result['title']))
+                    title = result.get('title', '')
+                    original_title = result.get('original_title', '')
+                    logging.info(f"Comparing {name} to {original_title}, ID {result.get('id')}")
+                    titleSimilarity = max(similarity(name, original_title), similarity(name, title))
                 else:
-                    if 'name' in result:
-                        logging.info(f"Comparing {name} to {result['name']}, aka {result['original_name']}, ID {result['id']}")
-                        titleSimilarity = max(similarity(name, result['original_name']), similarity(name, result['name']))
-                    else:
-                        logging.info(f"Comparing {name} to {result['original_name']}, ID {result['id']}")
-                        titleSimilarity = similarity(name, result['original_name'])
+                    show_name = result.get('name', '')
+                    original_name = result.get('original_name', '')
+                    logging.info(f"Comparing {name} to {show_name}, aka {original_name}, ID {result.get('id')}")
+                    titleSimilarity = max(similarity(name, original_name), similarity(name, show_name))
+                
                 logging.info("Similarity: " + str(titleSimilarity))
                 if titleSimilarity > 85:
-                    tmdb_id = result["id"]
-                    break
-            except KeyError:
+                    return result.get("id")
+            except (KeyError, TypeError):
                 continue
-        return tmdb_id
-
-    # If there are no results, return None
-    return tmdb_id
+        return None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to search TMDB for '{name}': {e}")
+        return None
 
 
 def getInfoDump(filePath: str, runDir: str):
@@ -376,6 +377,7 @@ def get_episode(filename: str):
 def similarity(s1, s2):
     distance = Levenshtein.distance(s1, s2)
     max_len = max(len(s1), len(s2))
+    if max_len == 0: return 100.0
     return 100 * (1 - distance / max_len)
 
 def has_folders(path_to_parent):
@@ -390,30 +392,29 @@ def folders_in(path_to_parent):
 def cb(torrent, filepath, pieces_done, pieces_total):
     print(f'{pieces_done/pieces_total*100:3.0f} % done', end="\r")
 
-def uploadToPTPIMG(imageFile: str, api_key):
-    # Stole this code from https://github.com/DeadNews/images-upload-cli
-    response = requests.post(
-        url="https://ptpimg.me/upload.php",
-        data={"api_key": api_key},
-        files={"file-upload[0]": open(imageFile, 'rb').read()},
-    )
-    if not response.ok:
-        try:
-            logging.error("Upload to ptpimg failed, trying again...")
-            response = requests.post(
-                url="https://ptpimg.me/upload.php",
-                data={"api_key": api_key},
-                files={"file-upload[0]": open(imageFile, 'rb').read()},
-            )
-            if not response.ok:
-                logging.error("Upload failed again. Something is probably wrong with ptpimg")
-                raise Exception(response.json())
-        except Exception:
-            return None
-
-    logging.debug(response.json())
-
-    return f"https://ptpimg.me/{response.json()[0]['code']}.{response.json()[0]['ext']}"
+def uploadToPTPIMG(imageFile: str, api_key: str):
+    """Uploads an image to PTPImg with robust error handling."""
+    try:
+        with open(imageFile, 'rb') as f:
+            file_payload = {"file-upload[0]": f.read()}
+        
+        response = requests.post(
+            url="https://ptpimg.me/upload.php",
+            data={"api_key": api_key},
+            files=file_payload,
+            timeout=20
+        )
+        response.raise_for_status()
+        
+        response_data = response.json()
+        return f"https://ptpimg.me/{response_data[0]['code']}.{response_data[0]['ext']}"
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"PTPImg upload failed for {os.path.basename(imageFile)}: {e}")
+        return None
+    except (json.JSONDecodeError, IndexError, KeyError) as e:
+        logging.error(f"PTPImg returned invalid data for {os.path.basename(imageFile)}: {e}")
+        return None
 
 def copy_folder_structure(src_path, dst_path):
     # Create the destination folder if it doesn't exist
@@ -475,57 +476,51 @@ def convert_sha1_hash(hash_str):
     hash_pieces = [hash_bytes[i:i+20] for i in range(0, len(hash_bytes), 20)]
     return b''.join(hash_pieces)
 
-def upload_to_imgbb(file_path, apiKey):
+def upload_to_imgbb(file_path: str, apiKey: str):
+    """Uploads an image to ImgBB with robust error handling."""
     api_endpoint = "https://api.imgbb.com/1/upload"
-    logging.info("Uploading " + file_path + " to imgbb...")
-    with open(file_path, "rb") as imagefile:
-        file_data = imagefile.read()
-        # Set the payload for the POST request
-        payload = {
-            "key": apiKey,
-            "image": b64encode(file_data),
-        }
-        try:
-            response = requests.post(api_endpoint, payload)
-            # Get the image URL from the response
-            if response.status_code != 200:
-                logging.warning(pformat(response.json()))
-                return None, None
-            image_url = response.json()["data"]["url"]
-            image_url_viewer = response.json()["data"]["url_viewer"]
-            return image_url, image_url_viewer
-        except Exception:
-            return None, None
+    try:
+        with open(file_path, "rb") as imagefile:
+            payload = {
+                "key": apiKey,
+                "image": b64encode(imagefile.read()),
+            }
+        response = requests.post(api_endpoint, payload, timeout=20)
+        response.raise_for_status()
+        
+        response_data = response.json()
+        image_url = response_data["data"]["url"]
+        image_url_viewer = response_data["data"]["url_viewer"]
+        return image_url, image_url_viewer
+            
+    except requests.exceptions.RequestException as e:
+        logging.error(f"ImgBB upload failed for {os.path.basename(file_path)}: {e}")
+        return None, None
+    except (json.JSONDecodeError, KeyError) as e:
+        logging.error(f"ImgBB returned invalid data for {os.path.basename(file_path)}: {e}")
+        return None, None
 
 
-def upload_to_catbox(file_path, user_hash=None):
-    # Catbox API endpoint for file upload
+def upload_to_catbox(file_path: str, user_hash: str = None):
+    """Uploads a file to Catbox with robust error handling."""
     url = "https://catbox.moe/user/api.php"
-
-    # Prepare the file to be uploaded
-    files = {'fileToUpload': (file_path, open(file_path, 'rb'))}
-
-    # Prepare the request parameters (user hash)
-    data = {
-        'reqtype': 'fileupload',
-    }
-
+    data = {'reqtype': 'fileupload'}
     if user_hash:
-        data['userhash']: user_hash
+        data['userhash'] = user_hash
 
     try:
-        # Send the POST request to Catbox API
-        response = requests.post(url, data=data, files=files)
-
-        # Check if the upload was successful and return the direct link
-        if response.status_code == 200:
-            direct_link = str(response.content.decode())
-            return direct_link
+        with open(file_path, 'rb') as f:
+            files = {'fileToUpload': (os.path.basename(file_path), f)}
+            response = requests.post(url, data=data, files=files, timeout=20)
+        response.raise_for_status()
+        
+        direct_link = response.text
+        if "catbox.moe" in direct_link:
+             return direct_link
         else:
-            # If upload failed, return an error message or handle the error accordingly
-            error_message = str(response.content)
-            return f"Upload failed: {error_message}"
+             logging.error(f"Catbox returned an error message: {direct_link}")
+             return None
 
-    except Exception as e:
-        logging.error(f"Error occurred: {e}\nResponse data: {response.content}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Catbox upload failed for {os.path.basename(file_path)}: {e}")
         return None

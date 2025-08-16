@@ -193,6 +193,7 @@ class Movie(MediaFile):
         self.metadata = self.fetch_metadata()
 
     def fetch_metadata(self) -> dict:
+        """Fetches metadata from The Movie Database (TMDb) with error handling."""
         if not self.tmdb_id:
             logging.info("Attempting to find TMDB ID for movie...")
             title_to_search = self.guessit_info.get('title', '')
@@ -204,11 +205,11 @@ class Movie(MediaFile):
 
         url = f'https://api.themoviedb.org/3/movie/{self.tmdb_id}?api_key={self.tmdb_api_key}'
         try:
-            response = requests.get(url)
-            response.raise_for_status()
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()  # Will raise an exception for 4xx/5xx errors
             return response.json()
-        except requests.RequestException as e:
-            logging.error(f"Failed to fetch TMDB data: {e}")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to fetch TMDB data for movie ID {self.tmdb_id}: {e}")
             return {}
 
     def generate_name(self, source: str, group: str, huno_format: bool) -> str:
@@ -248,6 +249,7 @@ class TVShow(MediaFile):
         self.metadata = self.fetch_metadata()
 
     def fetch_metadata(self) -> dict:
+        """Fetches TV show metadata from TMDb with error handling."""
         if not self.tmdb_id:
             logging.info("Attempting to find TMDB ID for TV show...")
             title_to_search = self.guessit_info.get('title', '')
@@ -259,11 +261,11 @@ class TVShow(MediaFile):
             
         url = f'https://api.themoviedb.org/3/tv/{self.tmdb_id}?api_key={self.tmdb_api_key}'
         try:
-            response = requests.get(url)
-            response.raise_for_status()
+            response = requests.get(url, timeout=15)
+            response.raise_for_status() # Will raise an exception for 4xx/5xx errors
             return response.json()
         except requests.RequestException as e:
-            logging.error(f"Failed to fetch TMDB data: {e}")
+            logging.error(f"Failed to fetch TMDB data for TV show ID {self.tmdb_id}: {e}")
             return {}
 
     def generate_name(self, source: str, group: str, huno_format: bool) -> str:
