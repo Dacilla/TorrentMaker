@@ -17,7 +17,7 @@ from torrent_utils.helpers import (
 )
 from torrent_utils.config_loader import load_settings, validate_settings
 
-__VERSION = "1.1.0" # Incremented version
+__VERSION = "1.1.1" # Incremented version
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -251,15 +251,24 @@ def main():
 
         else:
             # Standard format
+            # Adjust video codec format for standard naming
+            if videoCodec == "H264":
+                videoCodec = "H.264"
+            elif videoCodec == "H265":
+                videoCodec = "H.265"
+
             if isMovie:
                 parts = [showName, year, resolution, source, audio.replace(' ', ''), videoCodec]
                 postFileName = '.'.join(filter(None, parts)) + f"-{group}.{container}"
             else:
                 parts = [showName, year, episodeNum, resolution, source, audio.replace(' ', ''), videoCodec]
                 postFileName = '.'.join(filter(None, parts)) + f"-{group}.{container}"
+            
+            # Replace all spaces with dots for standard naming
+            postFileName = postFileName.replace(' ', '.')
 
         # Clean up filename
-        postFileName = postFileName.replace('..', '.').replace('\'', '').replace('é', 'e').replace('  ', ' ')
+        postFileName = postFileName.replace('..', '.').replace('\'', '').replace('é', 'e').replace('--', '-')
         logging.info("Final file name:\n" + postFileName)
         
         if arg.skip_prompts or getUserInput("Is this acceptable?"):
