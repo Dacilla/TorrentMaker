@@ -13,11 +13,12 @@ from datetime import datetime
 
 from torrent_utils.helpers import (
     get_tmdb_id, getInfoDump, getUserInput, get_season, get_episode, 
-    getResolution, get_audio_info, get_colour_space, get_language_name
+    getResolution, get_audio_info, get_colour_space, get_language_name,
+    get_path_list # Import the new helper function
 )
 from torrent_utils.config_loader import load_settings, validate_settings
 
-__VERSION = "1.1.1" # Incremented version
+__VERSION = "1.2.0" # Incremented version
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -97,27 +98,8 @@ def main():
     tmdb_api = settings.get('TMDB_API')
     # --- END Settings Section ---
 
-    pathList = []
-    if arg.path is None:
-        logging.info(f"No explicit path given, reading {BULK_DOWNLOAD_FILE}")
-        if not os.path.exists(BULK_DOWNLOAD_FILE):
-            logging.warning(f"No {BULK_DOWNLOAD_FILE} file found. Creating...")
-            with open(BULK_DOWNLOAD_FILE, 'w') as f:
-                f.write("")
-        with open(BULK_DOWNLOAD_FILE, 'r', encoding='utf-8') as dlFile:
-            file_contents = dlFile.read()
-            if not file_contents:
-                logging.error(f"No path given via arguments or in {BULK_DOWNLOAD_FILE}. Exiting...")
-                sys.exit(-1)
-            
-            for line in file_contents.split('\n'):
-                if line.strip(): # Ensure we don't add empty lines
-                    pathList.append(line.strip().replace("\"", ""))
-        logging.info(f"Loaded {len(pathList)} paths...")
-    else:
-        pathList.append(arg.path)
-
-    pathList.sort()
+    # --- Use the new helper function to get the list of paths ---
+    pathList = get_path_list(arg.path, BULK_DOWNLOAD_FILE)
 
     for path in pathList:
         guessItOutput = dict(guessit.guessit(os.path.basename(path)))

@@ -20,6 +20,43 @@ from pymediainfo import MediaInfo
 
 DUMPFILE = "mediainfo.txt"
 
+def get_path_list(arg_path, bulk_file_name):
+    """
+    Gets a list of paths from either a direct command-line argument or a bulk file.
+    
+    Args:
+        arg_path (str or None): The path provided via a command-line argument.
+        bulk_file_name (str): The name of the file to read for bulk processing.
+
+    Returns:
+        list: A sorted list of paths to be processed.
+    """
+    pathList = []
+    if arg_path:
+        pathList.append(arg_path)
+    else:
+        logging.info(f"No explicit path given, reading {bulk_file_name}")
+        if not os.path.exists(bulk_file_name):
+            logging.warning(f"No {bulk_file_name} file found. Creating a blank one.")
+            with open(bulk_file_name, 'w', encoding='utf-8') as f:
+                f.write("")
+            return []  # Return an empty list as there's nothing to process
+
+        with open(bulk_file_name, 'r', encoding='utf-8') as f:
+            lines = [line.strip().replace("\"", "") for line in f if line.strip()]
+            if not lines:
+                logging.error(f"No paths found in {bulk_file_name}. Please add paths to the file.")
+                sys.exit(-1)
+            pathList.extend(lines)
+            
+    if not pathList:
+        logging.error("No input paths were found to process. Exiting.")
+        sys.exit(-1)
+
+    logging.info(f"Loaded {len(pathList)} path(s) to process.")
+    return sorted(pathList)
+
+
 def download_mediainfo():
     """Downloads and extracts the MediaInfo CLI tool as a last resort."""
     url = "https://mediaarea.net/download/binary/mediainfo/22.12/MediaInfo_CLI_22.12_Windows_x64.zip"

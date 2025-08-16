@@ -28,19 +28,22 @@ from ftplib import FTP_TLS
 from tqdm import tqdm
 from concurrent import futures
 
-from torrent_utils.helpers import has_folders, cb, uploadToPTPIMG, copy_folder_structure, getUserInput, qbitInject, similarity
+from torrent_utils.helpers import (
+    has_folders, cb, uploadToPTPIMG, copy_folder_structure, 
+    getUserInput, qbitInject, similarity, get_path_list
+)
 from torrent_utils.config_loader import load_settings, validate_settings
 
-__VERSION = "1.0.0"
+__VERSION = "1.1.0" # Incremented version
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-BULK_DOWNLOAD_FILE = os.getcwd() + os.sep + "bulkProcess.txt"
+BULK_DOWNLOAD_FILE = os.path.join(os.getcwd(), "bulkProcess.txt")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Script to automate creation of torrent files, as well as grabbing mediainfo dump, screenshots, and tmdb description"
+        description="Script to automate creation of torrent files for music albums."
     )
     parser.add_argument(
         "-p", "--path", action="store",
@@ -127,6 +130,7 @@ def main():
         "-V", "--version", action="version", version="%(prog)s {version}".format(version=__VERSION),
     )
 
+
     # Take in the path and make a torrent file
     arg = parser.parse_args()
     level = logging.INFO
@@ -175,27 +179,8 @@ def main():
         ptpimg_api = None
     # --- END Settings Section ---
 
-    pathList = []
-    if not arg.path:
-        logging.info(f"No explicit path given, reading {BULK_DOWNLOAD_FILE}")
-        if not os.path.exists(BULK_DOWNLOAD_FILE):
-            logging.warning(f"No {BULK_DOWNLOAD_FILE} file found. Creating...")
-            with open(BULK_DOWNLOAD_FILE, 'w') as f:
-                f.write("")
-        with open(BULK_DOWNLOAD_FILE, 'r', encoding='utf-8') as dlFile:
-            file_contents = dlFile.read()
-            if len(file_contents) == 0:
-                logging.error(f"No path given in either arg.path or {BULK_DOWNLOAD_FILE}. Exiting...")
-                sys.exit(-1)
-            print(f"File contents: {file_contents}")
-            for line in file_contents.split('\n'):
-                pathList.append(line.strip().replace("\"", ""))
-                print(f"Added {line.strip()} to pathList")
-        logging.info("Loaded " + str(len(pathList)) + " paths...")
-    else:
-        pathList.append(arg.path)
-
-    pathList.sort()
+    # --- Use the new helper function to get the list of paths ---
+    pathList = get_path_list(arg.path, BULK_DOWNLOAD_FILE)
 
     # Initialise musicbrainz agent
     mb.set_useragent("My Music App", "1.0", "https://www.example.com")
@@ -204,6 +189,7 @@ def main():
     lastAlbumTitle = None
 
     for path in pathList:
+        # ... (The rest of the script logic remains the same)
         if not check_file_path_length(path):
             logging.info("A file path is too long in path: " + path)
             if arg.skipPrompts:
@@ -458,8 +444,7 @@ def main():
             else:
                 if not getUserInput("Upload failed. Continue anyway?"):
                     exit()
-
-
+# ... (rest of the functions are unchanged)
 def extract_album_art(folder_path):
     for root, dirs, files in os.walk(folder_path):
         for file in files:
