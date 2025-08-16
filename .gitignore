@@ -131,7 +131,9 @@ dmypy.json
 Mediainfo
 .vscode
 screenshots
-*.txt
+bulkProcess.txt
+commands.txt
+mediainfo.txt
 *.torrent
 runs
 *.ini

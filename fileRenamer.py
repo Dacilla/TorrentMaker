@@ -1,35 +1,26 @@
-import pymediainfo
 import argparse
 import logging
 import sys
-import guessit
 import os
 import re
-import json
-import requests
-
+import guessit
 from pprint import pformat
-from datetime import datetime
 
-from torrent_utils.helpers import (
-    get_tmdb_id, getInfoDump, getUserInput, get_season, get_episode, 
-    getResolution, get_audio_info, get_colour_space, get_language_name,
-    get_path_list # Import the new helper function
-)
+from torrent_utils.helpers import getUserInput, get_path_list
 from torrent_utils.config_loader import load_settings, validate_settings
+from torrent_utils.media import Movie, TVShow
 
-__VERSION = "1.2.0" # Incremented version
+__VERSION = "2.0.2" # Incremented version for the fix
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-DUMPFILE = "mediainfo.txt"
 BULK_DOWNLOAD_FILE = os.path.join(os.getcwd(), "bulkProcess.txt")
-
 
 def main():
     parser = argparse.ArgumentParser(
         description="A script to intelligently rename media files based on metadata."
     )
+    # Arguments remain the same as before
     parser.add_argument(
         "--path",
         "-p",
@@ -61,7 +52,7 @@ def main():
         "-s", "--source",
         action="store",
         type=str,
-        help="Source of the media (e.g., Blu-ray, WEB-DL).",
+        help="Source of the media (e.g., BluRay, WEB-DL).",
         default=None
     )
     parser.add_argument(
@@ -98,179 +89,62 @@ def main():
     tmdb_api = settings.get('TMDB_API')
     # --- END Settings Section ---
 
-    # --- Use the new helper function to get the list of paths ---
     pathList = get_path_list(arg.path, BULK_DOWNLOAD_FILE)
 
     for path in pathList:
-        guessItOutput = dict(guessit.guessit(os.path.basename(path)))
-        logging.info(pformat(guessItOutput))
-
-        group = arg.group
-        if not group:
-            if 'release_group' in guessItOutput:
-                group = guessItOutput['release_group']
-                group = re.sub(r"[\[\]\(\)\{\}]", " ", group).split()[0]
-            else:
-                group = "NOGRP"
-
-        isMovie = guessItOutput.get('type') == 'movie'
-
-        countryCode = None
-        tmdbID = arg.tmdb
-        if tmdbID is None and 'title' in guessItOutput:
-            logging.info("No TMDB ID given. Attempting to find it automatically...")
-            title = guessItOutput['title']
-            if 'country' in guessItOutput:
-                countryCode = guessItOutput['country'].alpha2
-                title = f"{title} {countryCode}"
-            
-            tmdbID = get_tmdb_id(title, tmdb_api, isMovie)
-            if tmdbID:
-                logging.info(f"TMDB ID Found: {tmdbID}")
-            else:
-                tmdbID = input("Failed to find TMDB ID. Please input manually:\n")
-
-        if os.path.exists(DUMPFILE):
-            os.remove(DUMPFILE)
-
-        logging.info("Reading MediaInfo...")
-        mediaInfoText = getInfoDump(path, os.getcwd())
-        mediaInfoJson = json.loads(mediaInfoText.strip())
-        logging.debug(pformat(mediaInfoJson))
-
-        tmdbData = None
-        if tmdbID:
-            logging.info("Getting TMDB info...")
-            api_path = 'movie' if isMovie else 'tv'
-            url = f'https://api.themoviedb.org/3/{api_path}/{tmdbID}?api_key={tmdb_api}'
-            try:
-                response = requests.get(url)
-                response.raise_for_status()
-                tmdbData = response.json()
-            except requests.RequestException as e:
-                logging.error(f"Failed to get TMDB data: {e}")
-                continue # Skip to the next file
-
-        showName = tmdbData.get('title' if isMovie else 'name', 'Unknown Show').replace(":", "")
-        logging.info(f"Name: {showName}")
-
-        date_key = 'release_date' if isMovie else 'first_air_date'
-        year = ''
-        if date_str := tmdbData.get(date_key):
-            try:
-                year = str(datetime.strptime(date_str, "%Y-%m-%d").year)
-                logging.info(f"Year: {year}")
-            except (ValueError, TypeError):
-                logging.warning("Could not parse year from date string.")
+        # --- Object-Oriented Approach ---
+        guessItOutput = guessit.guessit(os.path.basename(path))
+        is_movie = guessItOutput.get('type') == 'movie'
         
-        episodeNum = ""
-        episodeTitle = guessItOutput.get('episode_title')
-        if not isMovie:
-            season = get_season(os.path.basename(path))
-            episode = "E" + get_episode(os.path.basename(path))
-            episodeNum = f"{season}{episode}"
-            if episodeTitle:
-                episodeNum += f" - {episodeTitle}"
-
-        video_track = next((t for t in mediaInfoJson['media']['track'] if t['@type'] == 'Video'), None)
-        if not video_track:
-            logging.error(f"No video track found in {path}. Skipping.")
+        media_file = None
+        try:
+            if is_movie:
+                media_file = Movie(path, tmdb_api, arg.tmdb)
+            else:
+                media_file = TVShow(path, tmdb_api, arg.tmdb)
+        except ValueError as e:
+            logging.error(e)
             continue
-            
-        width = video_track.get('Width')
-        height = video_track.get('Height')
-        frameRate = video_track.get('FrameRate')
-        resolution = getResolution(width=width, height=height, frameRate=frameRate)
-        if "Interlaced" in str(mediaInfoJson):
-            resolution = resolution.replace("p", "i")
-        logging.info(f"Resolution: {resolution}")
 
-        videoCodec = "H264" # Default
-        if 'HEVC' in video_track.get('Format', ''):
-            if 'remux' in os.path.basename(path).lower(): videoCodec = 'HEVC'
-            elif 'h265' in os.path.basename(path).lower() or 'hevc' in os.path.basename(path).lower(): videoCodec = 'H265'
-            else: videoCodec = "x265"
-        elif "VC-1" in video_track.get('Format', ''): videoCodec = "VC-1"
-        elif "V_MPEG2" in video_track.get('CodecID', ''): videoCodec = "MPEG-2"
-        elif 'remux' in os.path.basename(path).lower(): videoCodec = "AVC"
-        elif 'x264' in os.path.basename(path).lower(): videoCodec = "x264"
-        logging.info(f"Video Codec: {videoCodec}")
-
-        audio = get_audio_info(mediaInfoJson)
-        logging.info(f"Audio: {audio}")
-
+        group = arg.group or media_file.guessit_info.get('release_group', 'NOGRP')
+        if isinstance(group, list):
+            group = group[0]
+        group = re.sub(r"[\[\]\(\)\{\}]", " ", group).split()[0]
+        
         source = arg.source or ""
-        logging.info(f"Source: {source}")
+        # --- ADDED: Standardize Blu-ray source naming ---
+        if source.lower() == 'blu-ray':
+            source = 'BluRay'
+            logging.info("Standardized source to 'BluRay'")
 
-        container = guessItOutput.get('container', 'mkv')
-        logging.info(f"Container: {container}")
+        postFileName = media_file.generate_name(source=source, group=group, huno_format=arg.huno_format)
 
-        if countryCode:
-            showName = f"{showName} {countryCode}"
+        if not postFileName:
+            logging.error(f"Could not generate a new name for {path}. Skipping.")
+            continue
 
-        # --- Filename Construction ---
-        if arg.huno_format:
-            # HUNO-specific format
-            colourSpace = get_colour_space(mediaInfoJson)
-            logging.info(f"Colour Space: {colourSpace}")
-            
-            audio_track = next((t for t in mediaInfoJson['media']['track'] if t['@type'] == 'Audio'), None)
-            language = "Eng" # Default
-            if audio_track and 'Language' in audio_track:
-                language = get_language_name(audio_track['Language'])
-            else:
-                language = input("No language found. Please input language:\n")
-            logging.info(f"Language: {language}")
-
-            if isMovie:
-                base_name = f"{showName} ({year})"
-                details = f"{resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}"
-                postFileName = f"{base_name} ({details}).{container}"
-            else:
-                base_name = f"{showName} ({year}) - {episodeNum}"
-                details = f"{resolution} {source} {videoCodec} {colourSpace} {audio} {language} - {group}"
-                postFileName = f"{base_name} ({details}).{container}"
-
-        else:
-            # Standard format
-            # Adjust video codec format for standard naming
-            if videoCodec == "H264":
-                videoCodec = "H.264"
-            elif videoCodec == "H265":
-                videoCodec = "H.265"
-
-            if isMovie:
-                parts = [showName, year, resolution, source, audio.replace(' ', ''), videoCodec]
-                postFileName = '.'.join(filter(None, parts)) + f"-{group}.{container}"
-            else:
-                parts = [showName, year, episodeNum, resolution, source, audio.replace(' ', ''), videoCodec]
-                postFileName = '.'.join(filter(None, parts)) + f"-{group}.{container}"
-            
-            # Replace all spaces with dots for standard naming
-            postFileName = postFileName.replace(' ', '.')
-
-        # Clean up filename
-        postFileName = postFileName.replace('..', '.').replace('\'', '').replace('é', 'e').replace('--', '-')
         logging.info("Final file name:\n" + postFileName)
         
         if arg.skip_prompts or getUserInput("Is this acceptable?"):
-            if os.path.exists(DUMPFILE):
-                os.remove(DUMPFILE)
-            
             destination_path = os.path.join(os.path.dirname(path), postFileName)
             
             try:
                 if arg.hardlink:
                     logging.info("Creating renamed hardlink...")
+                    if os.path.exists(destination_path):
+                        logging.warning(f"Destination file already exists: {destination_path}. Skipping.")
+                        continue
                     os.link(src=path, dst=destination_path)
                     logging.info(f"Hardlink created at: {destination_path}")
                 else:
                     logging.info("Renaming file...")
+                    if os.path.exists(destination_path):
+                         logging.warning(f"Destination file already exists: {destination_path}. Skipping.")
+                         continue
                     os.rename(src=path, dst=destination_path)
                     logging.info(f"File renamed to: {destination_path}")
             except OSError as e:
                 logging.error(f"Failed to rename/link file: {e}")
-
 
 if __name__ == "__main__":
     main()

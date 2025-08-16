@@ -1,0 +1,14 @@
+requests
+opencv-python
+torf
+qbittorrent-api
+guessit
+python-Levenshtein
+numpy
+Pillow
+pymediainfo
+colorthief
+babel
+mutagen
+musicbrainzngs
+tqdm
