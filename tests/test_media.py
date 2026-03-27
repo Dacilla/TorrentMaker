@@ -261,3 +261,128 @@ class TestGetLanguageName:
         f = _make_media_file(media_info=_make_media_info(audio=audio))
         with pytest.raises(ValueError):
             f.get_language_name()
+
+
+# ---------------------------------------------------------------------------
+# _filename_for_guessit  (AV1 stripping)
+# ---------------------------------------------------------------------------
+
+class TestFilenameForGuessit:
+    """Unit tests for the AV1-stripping pre-processing applied before guessit."""
+
+    def _av1_file(self, filename):
+        video = {"Format": "AV1", "Width": "1920", "Height": "1080"}
+        return _make_media_file(filename=filename, media_info=_make_media_info(video=video))
+
+    def _hevc_file(self, filename):
+        video = {"Format": "HEVC", "Width": "1920", "Height": "1080"}
+        return _make_media_file(filename=filename, media_info=_make_media_info(video=video))
+
+    def test_av1_before_hyphen_stripped(self):
+        f = self._av1_file("Show.S01E01.1080p.WEB-DL.DDP5.1.AV1-GRP.mkv")
+        assert f._filename_for_guessit() == "Show.S01E01.1080p.WEB-DL.DDP5.1-GRP.mkv"
+
+    def test_av1_before_dot_stripped(self):
+        f = self._av1_file("Show.S01E01.1080p.WEB-DL.DDP5.1.AV1.GRP.mkv")
+        assert f._filename_for_guessit() == "Show.S01E01.1080p.WEB-DL.DDP5.1.GRP.mkv"
+
+    def test_av1_case_insensitive(self):
+        f = self._av1_file("Show.S01E01.1080p.WEB-DL.DDP5.1.av1-GRP.mkv")
+        assert f._filename_for_guessit() == "Show.S01E01.1080p.WEB-DL.DDP5.1-GRP.mkv"
+
+    def test_not_stripped_when_codec_is_not_av1(self):
+        """AV1 in filename but MediaInfo reports HEVC — must not strip."""
+        f = self._hevc_file("Show.S01E01.1080p.WEB-DL.DDP5.1.AV1-GRP.mkv")
+        assert f._filename_for_guessit() == "Show.S01E01.1080p.WEB-DL.DDP5.1.AV1-GRP.mkv"
+
+    def test_no_av1_in_filename_unchanged(self):
+        f = self._av1_file("Show.S01E01.1080p.WEB-DL.x265-GRP.mkv")
+        assert f._filename_for_guessit() == "Show.S01E01.1080p.WEB-DL.x265-GRP.mkv"
+
+    def test_regression_one_piece(self):
+        """Regression for the original reported filename."""
+        f = self._av1_file("ONE.PIECE.S02E05.WAX.ON,.WAX.OFF.1080p.NF.WEB-DL.DDP5.1.AV1-DBMS.mkv")
+        assert f._filename_for_guessit() == "ONE.PIECE.S02E05.WAX.ON,.WAX.OFF.1080p.NF.WEB-DL.DDP5.1-DBMS.mkv"
+
+
+# ---------------------------------------------------------------------------
+# AV1 guessit integration — real guessit called via __init__
+# ---------------------------------------------------------------------------
+
+def _make_av1_mediafile(filename):
+    """Create a real MediaFile instance (mocked _parse_media_info) with AV1 video."""
+    from torrent_utils.media import MediaFile
+    video = {"Format": "AV1", "Width": "1920", "Height": "1080"}
+    media_info = _make_media_info(video=video)
+    with patch.object(MediaFile, "_parse_media_info", return_value=media_info):
+        return MediaFile(filename)
+
+
+class TestAV1GuessitIntegration:
+    """End-to-end: verify guessit receives a clean filename and returns the correct release_group."""
+
+    def test_release_group_is_clean(self):
+        f = _make_av1_mediafile("Show.S01E01.1080p.NF.WEB-DL.DDP5.1.AV1-DBMS.mkv")
+        assert f.guessit_info.get("release_group") == "DBMS"
+
+    def test_regression_one_piece(self):
+        f = _make_av1_mediafile("ONE.PIECE.S02E05.WAX.ON,.WAX.OFF.1080p.NF.WEB-DL.DDP5.1.AV1-DBMS.mkv")
+        assert f.guessit_info.get("release_group") == "DBMS"
+
+    def test_av1_not_in_release_group(self):
+        f = _make_av1_mediafile("Movie.2023.2160p.MA.WEB-DL.DDP5.1.AV1-GROUPNAME.mkv")
+        assert "AV1" not in (f.guessit_info.get("release_group") or "")
+
+    def test_video_codec_field_absent_from_guessit(self):
+        """Confirm guessit 3.8 still does not detect AV1 as video_codec (documents the known gap)."""
+        f = _make_av1_mediafile("Show.S01E01.1080p.NF.WEB-DL.DDP5.1.AV1-GRP.mkv")
+        assert f.guessit_info.get("video_codec") is None
+
+
+# ---------------------------------------------------------------------------
+# AV1 in generate_name output
+# ---------------------------------------------------------------------------
+
+def _make_av1_tvshow(filename):
+    """Create a TVShow with AV1 video/DDP audio/English, mocked metadata and network calls."""
+    from torrent_utils.media import TVShow
+    video = {"Format": "AV1", "Width": "1920", "Height": "1080"}
+    audio = {
+        "Format": "E-AC-3",
+        "Format_Commercial_IfAny": "Dolby Digital Plus",
+        "Channels": "6",
+        "ChannelLayout": "L R C LFE Ls Rs",
+        "Language": "en",
+    }
+    media_info = _make_media_info(video=video, audio=audio)
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"name": "Test Show", "first_air_date": "2023-01-01"}
+    with patch.object(TVShow, "_parse_media_info", return_value=media_info), \
+         patch("torrent_utils.media.requests.get", return_value=mock_resp):
+        return TVShow(filename, tmdb_api_key="fake", tmdb_id=12345)
+
+
+class TestAV1GenerateName:
+    """Tests that generate_name produces correct AV1 naming — codec present, not part of group."""
+
+    def test_huno_format_codec_is_av1(self):
+        f = _make_av1_tvshow("Show.S01E01.1080p.NF.WEB-DL.DDP5.1.AV1-GRP.mkv")
+        name = f.generate_name(source="NF WEB-DL", group="GRP", huno_format=True)
+        assert "AV1" in name
+
+    def test_huno_format_group_not_prefixed_with_av1(self):
+        f = _make_av1_tvshow("Show.S01E01.1080p.NF.WEB-DL.DDP5.1.AV1-GRP.mkv")
+        name = f.generate_name(source="NF WEB-DL", group="GRP", huno_format=True)
+        assert "- GRP)" in name
+        assert "AV1-GRP" not in name
+
+    def test_standard_format_codec_is_av1(self):
+        f = _make_av1_tvshow("Show.S01E01.1080p.NF.WEB-DL.DDP5.1.AV1-GRP.mkv")
+        name = f.generate_name(source="NF WEB-DL", group="GRP", huno_format=False)
+        assert "AV1" in name
+
+    def test_huno_format_full_structure(self):
+        """Regression: full expected name format for an AV1 episode."""
+        f = _make_av1_tvshow("Show.S01E01.1080p.NF.WEB-DL.DDP5.1.AV1-GRP.mkv")
+        name = f.generate_name(source="NF WEB-DL", group="GRP", huno_format=True)
+        assert name == "Test Show (2023) S01E01 (1080p NF WEB-DL AV1 SDR DDP 5.1 English - GRP).mkv"

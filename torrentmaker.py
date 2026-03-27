@@ -491,7 +491,11 @@ def main():
     else:
         if isFolder == 2:
             # For folder inputs, prefer the folder name for group detection (more reliable than episode filename)
-            folder_guessit = guessit.guessit(os.path.basename(path))
+            folder_name = os.path.basename(path)
+            video_format = media_file.video_track.get('Format', '') if media_file.video_track else ''
+            if 'AV1' in video_format:
+                folder_name = re.sub(r'[. ]AV1(?![A-Za-z0-9])', '', folder_name, flags=re.IGNORECASE)
+            folder_guessit = guessit.guessit(folder_name)
             detected_group = folder_guessit.get('release_group') or media_file.guessit_info.get('release_group')
         else:
             detected_group = media_file.guessit_info.get('release_group')

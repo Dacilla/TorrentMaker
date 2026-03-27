@@ -22,8 +22,17 @@ class MediaFile:
         self.filename = os.path.basename(file_path)
         logging.info(f"Initializing MediaFile for: {self.filename}")
         self.media_info = self._parse_media_info()
-        self.guessit_info = guessit.guessit(self.filename)
+        self.guessit_info = guessit.guessit(self._filename_for_guessit())
         logging.debug(f"Guessit Info: {self.guessit_info}")
+
+    def _filename_for_guessit(self) -> str:
+        """Return filename with codec tokens that guessit doesn't recognise stripped out,
+        so they don't bleed into release_group (e.g. AV1-DBMS → DBMS)."""
+        video_format = self.video_track.get('Format', '') if self.video_track else ''
+        filename = self.filename
+        if 'AV1' in video_format:
+            filename = re.sub(r'[. ]AV1(?![A-Za-z0-9])', '', filename, flags=re.IGNORECASE)
+        return filename
 
     def _parse_media_info(self) -> dict:
         try:
@@ -244,7 +253,7 @@ class Movie(MediaFile):
             logging.error(f"Failed to fetch TMDB data for movie ID {self.tmdb_id}: {e}")
             return {}
 
-    def generate_name(self, source: str, group: str, huno_format: bool) -> str:
+    def generate_name(self, source: str, group: str, huno_format: bool, is_season_pack: bool = False) -> str:
         """Generates a standardized filename for the movie."""
         if not self.metadata: return ""
 
