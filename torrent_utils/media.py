@@ -85,7 +85,7 @@ class MediaFile:
             raise RuntimeError("Video track found but width/height dimensions are missing. Cannot determine resolution.")
 
         width_to_height_dict = {"720": "576", "960": "540", "1280": "720", "1920": "1080", "4096": "2160", "3840": "2160", "692": "480", "1024": "576"}
-        acceptedHeights = ['576', '480', '360', '240', '720', '1080', '1440', '2160']
+        acceptedHeights = ['576', '540', '480', '360', '240', '720', '1080', '1440', '2160']
 
         width_str = str(width)
         height_str = str(height)
@@ -152,8 +152,8 @@ class MediaFile:
 
         # Codec mapping
         codecsDict = {
-            "E-AC-3": "EAC3", "MLP FBA": "TrueHD", "DTS": "DTS",
-            "AAC": "AAC", "PCM": "PCM", "AC-3": "DD",
+            "E-AC-3": "DDP", "MLP FBA": "TrueHD", "DTS": "DTS",
+            "AAC": "AAC", "PCM": "LPCM", "AC-3": "DD",
             "FLAC": "FLAC", "Opus": "OPUS"
         }
 
@@ -166,7 +166,7 @@ class MediaFile:
             elif "Dolby Digital" in commercialFormat: audio_format = "DD"
             elif "TrueHD" in commercialFormat: audio_format = "TrueHD"
             elif "DTS-HD Master Audio" in commercialFormat: audio_format = "DTS-HD MA"
-            elif "DTS-HD High Resolution Audio" in commercialFormat: audio_format = "DTS-HD HR"
+            elif "DTS-HD High Resolution Audio" in commercialFormat: audio_format = "DTS-HD HRA"
             elif "DTS-ES" in commercialFormat: audio_format = "DTS-ES"
             elif "DTS" in commercialFormat: audio_format = "DTS"
 
@@ -248,8 +248,8 @@ class MediaFile:
         if lang_code.lower() == 'zxx':
             return 'NONE'
         try:
-            locale = Locale(lang_code)
-            return locale.get_display_name('en')
+            locale = Locale.parse(lang_code.replace('-', '_'))
+            return Locale(locale.language).get_display_name('en')
         except Exception:
             raise ValueError(f"Unrecognised language code: {lang_code}")
 

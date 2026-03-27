@@ -55,7 +55,7 @@ SOURCE_TYPE_MAP = {
 # Maps resolution string to HUNO resolution_id
 RESOLUTION_ID_MAP = {
     "4320p": 1, "2160p": 2, "1080p": 3, "1080i": 4,
-    "720p": 5, "576p": 6, "576i": 7, "480p": 8, "480i": 9,
+    "720p": 5, "576p": 6, "576i": 7, "540p": 11, "480p": 8, "480i": 9,
 }
 
 # Known streaming service filename tokens → canonical abbreviation
@@ -73,7 +73,6 @@ STREAMING_SERVICES = {
     'crav': 'CRAV',
     'cr': 'CR',
     'itunes': 'iTunes', 'itunes': 'iT',
-    'aius': 'AIUS',
 }
 
 # HUNO type_id values
