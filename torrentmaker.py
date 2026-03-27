@@ -624,6 +624,7 @@ def main():
         logging.info(f"Torrent file wrote to {torrentFileName}")
     
     # --- HUNO Upload Logic ---
+    upload_succeeded = False
     if arg.huno:
         logging.info("Preparing HUNO upload...")
 
@@ -730,6 +731,7 @@ def main():
                     response.raise_for_status()
                     result = response.json()
                     if result.get("success"):
+                        upload_succeeded = True
                         logging.info(f"HUNO upload successful: {result.get('message')}")
                         if result.get("data", {}).get("warnings"):
                             logging.warning(f"HUNO warnings: {result['data']['warnings']}")
@@ -742,7 +744,7 @@ def main():
                 logging.error(f"HUNO upload request failed: {e}")
 
     # --- qBitTorrent Injection ---
-    if arg.inject:
+    if arg.inject and (not arg.huno or upload_succeeded):
         logging.info("Qbittorrent injection enabled")
         category = "HUNO" if arg.huno else ""
         paused = not arg.huno
