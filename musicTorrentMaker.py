@@ -23,7 +23,7 @@ from mutagen.flac import FLAC
 from mutagen.easyid3 import EasyID3
 from mutagen import File
 import musicbrainzngs as mb
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 from ftplib import FTP_TLS
 from tqdm import tqdm
 from concurrent import futures
@@ -34,7 +34,7 @@ from torrent_utils.helpers import (
 )
 from torrent_utils.config_loader import load_settings, validate_settings
 
-__VERSION = "1.2.0" # Incremented version
+__VERSION = "1.4.2"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -92,11 +92,16 @@ def main():
         help="Enable to automatically copy given folder to seedbox if given in settings"
     )
     parser.add_argument(
-        "-u",
-        "--upload",
+        "-u", "--upload",
         action="store_true",
         default=False,
-        help="Enable to automatically upload to RED"
+        help="Enable to automatically upload to REDacted"
+    )
+    parser.add_argument(
+        "--ops",
+        action="store_true",
+        default=False,
+        help="Enable to automatically upload to Orpheus (OPS)"
     )
     parser.add_argument(
         "-f",
@@ -144,9 +149,13 @@ def main():
         level = logging.DEBUG
 
     logging.basicConfig(datefmt=LOG_DATE_FORMAT, format=LOG_FORMAT, level=level)
+    
+    # Silence the verbose logger from the musicbrainzngs library
+    logging.getLogger("musicbrainzngs.mbxml").setLevel(logging.WARNING)
+
     logging.info(f"Version {__VERSION} starting...")
     
-    # --- Ensure FLAC CLI is available if we need it ---
+    # Check for FLAC dependency if needed (only if explicitly asked)
     if arg.fixMD5 and not arg.skip_flac_check:
         ensure_flac_cli()
 
@@ -155,7 +164,9 @@ def main():
     
     required_settings = []
     if arg.upload:
-        required_settings.extend(['RED_API', 'RED_URL', 'PTPIMG_API'])
+        required_settings.extend(['RED_API', 'RED_ANNOUNCE_URL', 'PTPIMG_API'])
+    if arg.ops:
+        required_settings.extend(['OPS_API', 'OPS_ANNOUNCE_URL'])
     if arg.inject:
         required_settings.extend(['QBIT_HOST', 'QBIT_USERNAME', 'QBIT_PASSWORD'])
     if arg.sbcopy:
@@ -163,19 +174,19 @@ def main():
             'SEEDBOX_HOST', 'SEEDBOX_PORT', 'SEEDBOX_FTP_USER', 'SEEDBOX_FTP_PASSWORD',
             'SEEDBOX_QBIT_HOST', 'SEEDBOX_QBIT_USER', 'SEEDBOX_QBIT_PASSWORD'
         ])
-    # All music torrents need a seeding dir for hardlinking
     required_settings.append('SEEDING_DIR')
-
 
     validate_settings(settings, required_settings)
     
-    # Assign settings to variables to maintain original script structure
+    # Assign settings to variables
     qbit_username = settings.get('QBIT_USERNAME')
     qbit_password = settings.get('QBIT_PASSWORD')
     qbit_host = settings.get('QBIT_HOST')
     ptpimg_api = settings.get('PTPIMG_API')
-    red_url = settings.get('RED_URL')
+    red_announce_url = settings.get('RED_ANNOUNCE_URL')
     red_api = settings.get('RED_API')
+    ops_announce_url = settings.get('OPS_ANNOUNCE_URL')
+    ops_api = settings.get('OPS_API')
     seedbox_host = settings.get('SEEDBOX_HOST')
     seedbox_port = settings.getint('SEEDBOX_PORT') if settings.get('SEEDBOX_PORT') else 0
     seedbox_qbit_host = settings.get('SEEDBOX_QBIT_HOST')
@@ -183,19 +194,20 @@ def main():
     seedbox_qbit_password = settings.get('SEEDBOX_QBIT_PASSWORD')
     seedbox_ftp_user = settings.get('SEEDBOX_FTP_USER')
     seedbox_ftp_password = settings.get('SEEDBOX_FTP_PASSWORD')
+    seedbox_remote_path = settings.get('SEEDBOX_REMOTE_PATH') or '/downloads/qbittorrent'
     seeding_dir = settings.get('SEEDING_DIR')
 
     if ptpimg_api == '':
         ptpimg_api = None
     # --- END Settings Section ---
 
-    # --- Use the new helper function to get the list of paths ---
     pathList = get_path_list(arg.path, BULK_DOWNLOAD_FILE)
 
     # Initialise musicbrainz agent
     mb.set_useragent("My Music App", "1.0", "https://www.example.com")
 
     lastGroupID = None
+    lastOpsGroupID = None
     lastAlbumTitle = None
 
     for path in pathList:
@@ -205,6 +217,8 @@ def main():
                 logging.info("Skipping...")
             else:
                 sys.exit()
+        
+        # Determine if album has multiple discs and get metadata
         discsArr = []
         if os.path.exists(os.path.join(path, 'Disc 1')):
             discsArr = find_disc_folders(path)
@@ -215,6 +229,8 @@ def main():
             album = get_first_song_album(path)
         logging.info("Gotten artist: " + artist)
         logging.info("Gotten album: " + album)
+
+        # Match album with MusicBrainz to get release group info
         releaseForm = None
         releaseGroupID = None
         if lastAlbumTitle != album or not arg.skipPrompts:
@@ -242,6 +258,8 @@ def main():
                         releaseForm = musicBrainzAlbumInfo['release-group']['secondary-type-list'][0]
                 elif 'primary-type' in musicBrainzAlbumInfo['release-group']:
                     releaseForm = musicBrainzAlbumInfo['release-group']['primary-type']
+        
+        # Create a unique directory for this run's output files
         if not os.path.isdir("runs"):
             os.mkdir("runs")
             os.mkdir(f"runs{os.sep}001")
@@ -267,6 +285,7 @@ def main():
         logging.info("Run directory: " + runDir)
         logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
 
+        # Optional: Format filenames with track numbers
         if arg.format:
             logging.info("Formatting mode enabled...")
             if len(discsArr) > 0:
@@ -275,14 +294,41 @@ def main():
             else:
                 add_track_position(path)
 
+        # Pre-upload checks
         logging.info("Checking for missing tracks...")
         missingTracksList = check_missing_tracks(path)
         if len(missingTracksList) > 0:
             logging.warning(f"Missing tracks found :{pformat(missingTracksList)} not allowed on RED")
             continue
         logging.info("No missing tracks found.")
-        logging.info("Checking for invalid characters in filenames...")
-        # sanitize_filenames(path)
+        
+        # --- Proactive MD5 Check ---
+        if not arg.fixMD5: 
+            logging.info("Scanning for missing MD5 signatures...")
+            if check_md5_signatures(path):
+                prompt = "Missing MD5 signatures were found in one or more FLAC files. This is not allowed on many trackers. Would you like to fix them now?"
+                if getUserInput(prompt):
+                    if not arg.skip_flac_check:
+                        ensure_flac_cli()
+                    
+                    logging.info("Fixing unset MD5 signatures as requested...")
+                    if len(discsArr) > 0:
+                        for discPath in discsArr:
+                            oldCwd = os.getcwd()
+                            fixMD5(discPath)
+                            os.chdir(oldCwd)
+                    else:
+                        oldCwd = os.getcwd()
+                        fixMD5(path)
+                        os.chdir(oldCwd)
+                    logging.info("All flac files fixed.")
+                else:
+                    logging.warning("Skipping album due to missing MD5 signatures.")
+                    continue
+            else:
+                logging.info("No missing MD5 signatures found.")
+
+        # Optional: Fix FLAC MD5 signatures (if explicitly requested)
         if arg.fixMD5:
             logging.info("Fixing any unset MD5 signatures...")
             if len(discsArr) > 0:
@@ -290,23 +336,27 @@ def main():
                     oldCwd = os.getcwd()
                     fixMD5(discPath)
                     os.chdir(oldCwd)
-                    logging.info("All flac files fixed")
             else:
                 oldCwd = os.getcwd()
                 fixMD5(path)
                 os.chdir(oldCwd)
-                logging.info("All flac files fixed")
+            logging.info("All flac files fixed.")
+
+        # Generate tracklist for description
         logging.info("Generating track list...")
         if len(discsArr) > 0:
             create_track_list(discsArr, runDir + "trackData.txt")
         else:
             create_track_list(path, runDir + "trackData.txt")
 
+        # Upload cover art
+        coverImgURL = ""
         if ptpimg_api:
-            if os.path.exists(path + os.sep + "cover.jpg"):
-                cover = path + os.sep + "cover.jpg"
-            elif os.path.exists(path + os.sep + "cover.png"):
-                cover = path + os.sep + "cover.png"
+            cover = None
+            if os.path.exists(os.path.join(path, "cover.jpg")):
+                cover = os.path.join(path, "cover.jpg")
+            elif os.path.exists(os.path.join(path, "cover.png")):
+                cover = os.path.join(path, "cover.png")
             elif arg.cover:
                 cover = arg.cover
             else:
@@ -315,23 +365,46 @@ def main():
                     cover = extract_album_art(discsArr[0])
                 else:
                     cover = extract_album_art(path)
-            logging.info("Uploading cover image to ptpimg")
-            logging.info("Cover image path: " + cover)
-            coverImgURL = uploadToPTPIMG(cover, ptpimg_api)
-            with open(runDir + "coverImgURL.txt", 'w') as file:
-                file.write(coverImgURL)
-            logging.info("Cover image uploaded and URL added to " + runDir + "coverImgURL.txt")
-            logging.info("URL: " + coverImgURL)
+            
+            if not cover:
+                logging.error("Could not find or extract a cover image for this album.")
+                if getUserInput("A cover image is required for uploads. Do you want to provide a path to the cover image now?"):
+                    cover = input("Please enter the full path to the cover image:\n").strip().replace("\"", "")
+                    if not os.path.exists(cover):
+                        logging.error("The provided path does not exist. Exiting.")
+                        sys.exit(1)
+                else:
+                    logging.error("Exiting because no cover image is available.")
+                    sys.exit(1)
+            
+            while True:
+                logging.info(f"Uploading cover image: {cover}")
+                coverImgURL = uploadToPTPIMG(cover, ptpimg_api)
+                if coverImgURL:
+                    with open(os.path.join(runDir, "coverImgURL.txt"), 'w') as file:
+                        file.write(coverImgURL)
+                    logging.info(f"Cover image uploaded successfully. URL: {coverImgURL}")
+                    break
+                else:
+                    logging.error("Failed to upload cover image.")
+                    if not getUserInput("Do you want to retry the cover image upload? (Answering 'no' will exit the script)"):
+                        logging.error("Exiting because cover image upload failed and is required.")
+                        sys.exit(1)
 
+        # Create the .torrent file
         logging.info("Creating torrent file")
         torrent = torf.Torrent()
         torrent.private = True
-        torrent.source = "RED"
+        
+        # Add trackers based on user flags
+        if arg.upload:
+            torrent.trackers.append(red_announce_url)
+        if arg.ops:
+            torrent.trackers.append(ops_announce_url)
+
         torrent.path = path
-        torrent.trackers.append(red_url)
         torrentFileName = os.path.basename(path).strip() + ".torrent"
         head, tail = os.path.split(path)
-        headBasename = os.path.basename(head)
         postName = os.path.basename(path)
         if head != seeding_dir:
             logging.info("Attempting to create hardlinks for easy seeding...")
@@ -345,114 +418,253 @@ def main():
         torrent.write(runDir + torrentFileName)
         logging.info("Torrent file wrote to " + torrentFileName)
 
-        if red_api and arg.upload:
-            logging.info("Attempting to upload to RED...")
-            if len(discsArr) > 0:
-                for discPath in discsArr:
-                    print_all_metadata_path(discPath)
-            else:
-                print_all_metadata_path(path)
-            if releaseForm is None:
-                if len(discsArr) > 0:
-                    releaseType = get_album_type(discsArr)
-                else:
-                    releaseType = get_album_type(path)
-            else:
-                releaseType = releaseForm
-            logging.info("Release type: " + releaseType)
+        # --- Prepare common metadata for uploads ---
+        if arg.upload or arg.ops:
             if len(discsArr) > 0:
                 audioFormat = detect_audio_format(discsArr[0])
-                logging.info("Audio format: " + audioFormat)
                 bitrate = get_bitrate_or_lossless(discsArr[0])
-            else:
-                audioFormat = detect_audio_format(path)
-                logging.info("Audio format: " + audioFormat)
-                bitrate = get_bitrate_or_lossless(path)
-            if bitrate == "Other":
-                logging.error("No bitrate found. Passing to next album")
-                continue
-            logging.info("Bitrate: " + bitrate)
-            if len(discsArr) > 0:
                 genre = get_genre(discsArr[0])
-            else:
-                genre = get_genre(path)
-            logging.info("Genre: " + str(genre))
-            original_release_year = None
-            if arg.ogyear:
-                original_release_year = arg.ogyear
-                logging.info("Original release year: " + str(original_release_year))
-
-            if len(discsArr) > 0:
                 release_year = get_release_year(discsArr[0])
-            else:
-                release_year = get_release_year(path)
-            logging.info("Release year: " + str(release_year))
-            recordLabel = None
-            if len(discsArr) > 0:
                 recordLabel = extract_label(discsArr[0])
             else:
+                audioFormat = detect_audio_format(path)
+                bitrate = get_bitrate_or_lossless(path)
+                genre = get_genre(path)
+                release_year = get_release_year(path)
                 recordLabel = extract_label(path)
-            if recordLabel:
-                logging.info("Record Label: " + recordLabel)
-            groupId = None
-            noDesc = False
-            if arg.nodesc:
-                noDesc = True
-                logging.info("Album description disabled.")
-            if lastAlbumTitle == album:
-                logging.info("Album name match to last upload. Using same group ID...")
-                groupId = lastGroupID
-            if arg.groupid:
-                groupId = arg.groupid
-                logging.info("RED Group ID: " + str(groupId))
-            lastAlbumTitle = album
-            if arg.sbcopy and seedbox_port and seedbox_host and seedbox_ftp_password and seedbox_ftp_user:
-                logging.info("Seedbox copy enabled")
-                ftp_copy_folder(path, seedbox_host, seedbox_port, seedbox_ftp_user, seedbox_ftp_password)
 
-            response = upload_music_data(runDir=runDir,
-                                         torrent_file=runDir + torrentFileName,
-                                         artists=artist,
-                                         title=album,
-                                         year=release_year,
-                                         ogyear=original_release_year,
-                                         releasetype=releaseType,
-                                         audioFormat=audioFormat,
-                                         bitrate=bitrate,
-                                         media="WEB",
-                                         tags=genre,
-                                         recordLabel=recordLabel,
-                                         image=coverImgURL,
-                                         api=red_api,
-                                         releaseGroup=releaseGroupID,
-                                         redGroupId=groupId,
-                                         noDesc=noDesc,
-                                         skipPrompts=arg.skipPrompts)
-            if response is None:
-                continue
+            releaseType = get_album_type(discsArr if discsArr else path) if not releaseForm else releaseForm
+            
+            # --- Upload to REDacted ---
+            if arg.upload:
+                logging.info("Attempting to upload to REDacted...")
+                redGroupId_to_use = arg.groupid
+                if not redGroupId_to_use and lastAlbumTitle == album:
+                    logging.info("Album name matches the last upload. Using the same REDacted group ID...")
+                    redGroupId_to_use = lastGroupID
+
+                response_red = upload_to_red(runDir=runDir,
+                                             torrent_file=os.path.join(runDir, torrentFileName),
+                                             artists=artist, title=album, year=release_year,
+                                             ogyear=arg.ogyear, releasetype=releaseType,
+                                             audioFormat=audioFormat, bitrate=bitrate, media=arg.source,
+                                             tags=genre, recordLabel=recordLabel, image=coverImgURL,
+                                             api=red_api, releaseGroup=releaseGroupID,
+                                             redGroupId=redGroupId_to_use, noDesc=arg.nodesc,
+                                             skipPrompts=arg.skipPrompts)
+                if response_red:
+                    try:
+                        response_json = response_red.json()
+                        if response_red.status_code == 200 and response_json.get('status') == 'success':
+                            lastGroupID = response_json['response']['groupid']
+                            logging.info(f"Saved new REDacted Group ID: {lastGroupID}")
+                        else:
+                            logging.error(f"REDacted API returned an error: {response_json.get('error', 'Unknown error')}")
+                    except json.JSONDecodeError:
+                        logging.error("Failed to decode JSON from REDacted response. The site may be down or returned an error page.")
+                        logging.error(f"Response Text: {response_red.text}")
+                
+            # --- Upload to Orpheus ---
+            if arg.ops:
+                logging.info("Attempting to upload to Orpheus...")
+                opsGroupId_to_use = None
+                if lastAlbumTitle == album:
+                    logging.info("Album name matches the last upload. Using the same Orpheus group ID...")
+                    opsGroupId_to_use = lastOpsGroupID
+
+                response_ops = upload_to_orpheus(runDir=runDir,
+                                  torrent_file=os.path.join(runDir, torrentFileName),
+                                  artists=artist, title=album, year=release_year,
+                                  releasetype=releaseType, audioFormat=audioFormat,
+                                  bitrate=bitrate, media=arg.source, tags=genre,
+                                  image=coverImgURL, api=ops_api,
+                                  recordLabel=recordLabel,
+                                  remaster_year=arg.ogyear,
+                                  opsGroupId=opsGroupId_to_use,
+                                  skipPrompts=arg.skipPrompts)
+                if response_ops:
+                    try:
+                        response_json = response_ops.json()
+                        if response_ops.status_code == 200 and response_json.get('status') == 'success':
+                            lastOpsGroupID = response_json['response']['groupId']
+                            logging.info(f"Saved new Orpheus Group ID: {lastOpsGroupID}")
+                        else:
+                            logging.error(f"Orpheus API returned an error: {response_json.get('error', 'Unknown error')}")
+                    except json.JSONDecodeError:
+                        logging.error("Failed to decode JSON from Orpheus response. The site may be down or returned an error page.")
+                        logging.error(f"Response Text: {response_ops.text}")
+
+        lastAlbumTitle = album
+
+def check_md5_signatures(directory):
+    """
+    Scans all FLAC files in a directory to see if any are missing an MD5 signature.
+
+    Args:
+        directory (str): The path to the directory containing the music files.
+
+    Returns:
+        bool: True if any FLAC files are missing an MD5 signature, False otherwise.
+    """
+    flac_files = []
+    # Find all FLAC files recursively
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.lower().endswith('.flac'):
+                flac_files.append(os.path.join(root, file))
+
+    if not flac_files:
+        return False # No FLAC files to check
+
+    missing_md5 = False
+    for file_path in flac_files:
+        try:
+            audio = FLAC(file_path)
+            if not audio.info.md5_signature:
+                logging.warning(f"Missing MD5 signature in: {os.path.basename(file_path)}")
+                missing_md5 = True
+        except Exception as e:
+            logging.error(f"Could not read metadata from {os.path.basename(file_path)}: {e}")
+    
+    return missing_md5
+
+def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, redGroupId=None, ogyear=None, noDesc=False, skipPrompts=False):
+    """Constructs and sends the upload request to the REDacted API."""
+    url = "https://redacted.ch/ajax.php?action=upload"
+
+    with open(os.path.join(runDir, "trackData.txt"), 'r', encoding='UTF-8') as _td:
+        albumDesc = _td.read()
+    albumDesc = albumDesc.replace('\u2008', ' ')
+    if releaseGroup:
+        musicBrainzURL = "https://musicbrainz.org/release-group/" + releaseGroup
+        albumDesc = albumDesc + "\n\n\n" + f"[url={musicBrainzURL}]MusicBrainz Release Group[/url]"
+
+    if 'remix' in title.lower():
+        releasetype = 'Remix'
+
+    release_types = {
+        'Album': 1, 'Soundtrack': 3, 'EP': 5, 'Anthology': 6, 'Compilation': 7,
+        'Single': 9, 'Live album': 11, 'Remix': 13, 'Bootleg': 14, 'Interview': 15,
+        'Mixtape': 16, 'Demo': 17, 'Concert Recording': 18, 'DJ Mix': 19, 'Unknown': 21
+    }
+    releasetype_id = release_types.get(releasetype, None)
+
+    tags_str: str = format_genres(tags)
+    if len(tags_str) > 0:
+        tags_str += ", " + str(year)[:3] + '0s'
+    else:
+        tags_str = str(year)[:3] + '0s'
+    logging.info("Tags: " + tags_str)
+    
+    artists_list = artists.split(', ')
+    importance = ['Main'] * len(artists_list)
+    importance_ids = convert_roles_to_int(importance)
+    
+    remasteryear = year
+    if ogyear:
+        year = ogyear
+
+    headers = {
+        "Authorization": api,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
+    }
+
+    data = {
+        'type': 0, 'title': title, 'year': year, 'remaster_year': remasteryear,
+        'releasetype': releasetype_id, 'format': audioFormat, 'bitrate': bitrate,
+        'media': media, 'image': image, 'tags': tags_str, 'album_desc': albumDesc
+    }
+
+    if noDesc:
+        data.pop('album_desc')
+
+    if redGroupId:
+        data['groupid'] = redGroupId
+
+    if recordLabel:
+        if len(recordLabel) < 2 or len(recordLabel) > 80:
+            recordLabel = input("Gotten record label too long or too short for RED\nGotten label: " + recordLabel + "\nPlease input a record label:\n")
+        if 'records dk' in recordLabel.lower() or artists_list[0].lower() == recordLabel.lower():
+            recordLabel = 'Self-Released'
+        data['remaster_record_label'] = recordLabel
+
+    for i, artist_name in enumerate(artists_list):
+        data[f"artists[{i}]"] = artist_name
+        data[f"importance[{i}]"] = importance_ids[i]
+
+    pprint(data)
+    if skipPrompts or getUserInput("Do you want to upload this to REDacted?"):
+        try:
+            with open(torrent_file, 'rb') as torrent_f:
+                torrent_payload = {'file_input': torrent_f}
+                response = requests.post(headers=headers, url=url, data=data, files=torrent_payload, timeout=30)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to upload to REDacted: {e}")
+            if 'response' in locals() and response:
+                logging.error(f"Response content: {response.text}")
+            return None
+    else:
+        return None
+
+def upload_to_orpheus(runDir, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, remaster_year=None, opsGroupId=None, skipPrompts=False):
+    """Constructs and sends the upload request to the Orpheus API."""
+    
+    upload_url = "https://orpheus.network/ajax.php?action=upload"
+    headers = { "Authorization": f"token {api}" }
+
+    with open(os.path.join(runDir, "trackData.txt"), 'r', encoding='UTF-8') as _td:
+        albumDesc = _td.read()
+
+    release_types = {
+        'Album': 1, 'Soundtrack': 3, 'EP': 5, 'Anthology': 6, 'Compilation': 7,
+        'Single': 9, 'Live album': 11, 'Remix': 13, 'Bootleg': 14, 'Interview': 15,
+        'Mixtape': 16, 'Demo': 17, 'Concert Recording': 18, 'DJ Mix': 19, 'Unknown': 21
+    }
+    releasetype_id = release_types.get(releasetype, 21) # Default to Unknown
+
+    artists_list = artists.split(', ')
+    
+    data = {
+        'type': 0, 'title': title, 'year': year, 'releasetype': releasetype_id,
+        'format': audioFormat, 'bitrate': bitrate, 'media': media,
+        'tags': tags.replace(' ', '.').lower(), 'image': image, 'album_desc': albumDesc,
+        'release_desc': ''
+    }
+
+    if opsGroupId:
+        data['groupid'] = opsGroupId
+        logging.info(f"Using existing Orpheus Group ID: {opsGroupId}")
+
+    for i, artist_name in enumerate(artists_list):
+        data[f'artists[{i}]'] = artist_name
+        data[f'importance[{i}]'] = 1 # 1 for Main
+
+    if recordLabel:
+        data['record_label'] = recordLabel
+        
+    if remaster_year:
+        data['remaster'] = 1
+        data['remaster_year'] = remaster_year
+
+    pprint(data)
+    if skipPrompts or getUserInput("Do you want to upload this to Orpheus?"):
+        try:
+            with open(torrent_file, 'rb') as torrent_f:
+                files = {'file_input': torrent_f}
+                response = requests.post(url=upload_url, headers=headers, data=data, files=files, timeout=30)
+            response.raise_for_status()
+            logging.info("Successfully uploaded to Orpheus.")
             pprint(response.json())
-            if response.status_code == 200:
-                lastGroupID = response.json()['response']['groupid']
-                logging.info("Downloading torrent file to dir: " + runDir)
-                downloadedTorrent = download_torrent(runDir=runDir, torrent_id=response.json()['response']['torrentid'], api_key=red_api)
-                if downloadedTorrent is not None:
-                    logging.info("Torrent downloaded to: " + downloadedTorrent)
-                    if arg.inject:
-                        logging.info("Injecting to qbit...")
-                        paused = False
-                        if arg.sbcopy:
-                            qbitInject(qbit_host=seedbox_qbit_host, qbit_username=seedbox_qbit_user, qbit_password=seedbox_qbit_password, runDir=runDir, torrentFileName=os.path.basename(downloadedTorrent), paused=paused, postName=postName, category="Redacted", seedTimeLimit=-1)
-                        qbitInject(qbit_host=qbit_host, qbit_username=qbit_username, qbit_password=qbit_password, runDir=runDir, torrentFileName=os.path.basename(downloadedTorrent), paused=paused, postName=postName, category="Redacted", seedTimeLimit=-1)
-                    logging.info("Copying torrent to ubuntu VM...")
-                    # Destination directory path
-                    dst_dir_path = r'U:\home\alex\redcurry\torrent-files'
-
-                    # Copy the file to the destination directory
-                    copyDest = shutil.copy(downloadedTorrent, dst_dir_path)
-                    logging.info("Torrent file successfully copied to: " + copyDest)
-            else:
-                if not getUserInput("Upload failed. Continue anyway?"):
-                    exit()
+            return response
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to upload to Orpheus: {e}")
+            if 'response' in locals() and response:
+                logging.error(f"Response content: {response.text}")
+            return None
+    else:
+        return None
 
 def extract_album_art(folder_path):
     for root, dirs, files in os.walk(folder_path):
@@ -461,10 +673,8 @@ def extract_album_art(folder_path):
                 audio_file_path = os.path.join(root, file)
                 audio = File(audio_file_path)
                 if 'APIC:' in audio:
-                    # For MP3 files
                     cover = audio.tags['APIC:'].data
                 elif 'covr' in audio:
-                    # For M4A files
                     cover = audio['covr'][0]
                 elif file.lower().endswith('.flac'):
                     pics = audio.pictures
@@ -477,26 +687,16 @@ def extract_album_art(folder_path):
                 cover_path = os.path.join(folder_path, 'cover.jpg')
                 with open(cover_path, 'wb') as cover_file:
                     cover_file.write(cover)
-
                 return cover_path
     logging.info("No cover art found")
     return None
 
-
 def fixMD5(folder_path):
-    # Change to the specified folder
     os.chdir(folder_path)
-
-    # Define the command as a list of strings
     command = ['flac', '-f8', '*.flac']
-
-    # Use subprocess.Popen to execute the command and capture its output
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, shell=True)
-
-    # Loop through the output and print each line as it is generated
     for line in process.stdout:
         print(line, end='')
-
     for root, dirs, files in os.walk(folder_path):
         for file in files:
             if '.tmp' in file:
@@ -504,17 +704,13 @@ def fixMD5(folder_path):
                 os.remove(file_path)
                 logging.info(f"Deleted file: {file_path}")
 
-
 def find_disc_folders(folder_path):
     disc_folders = []
-
     for root, dirs, files in os.walk(folder_path):
         for dir_name in dirs:
             if dir_name.startswith('Disc'):
                 disc_folders.append(os.path.join(root, dir_name))
-
     return disc_folders
-
 
 def extract_label(path):
     label = None
@@ -534,56 +730,32 @@ def extract_label(path):
                 break
             except Exception:
                 continue
-        else:
-            continue  # Skip files that are not MP3 or FLAC
     if copyright_string:
         label = process_string(copyright_string)
-
-    # Split the string based on 'Under Exclusive License'
     if label is not None:
         parts = label.lower().split('under exclusive')
-
-        # Return the portion of the string before the occurrence
         if len(parts) > 0:
             label = parts[0].strip()
-
     return label
 
-
 def process_string(input_string):
-    # Remove any series of 4 digits
     output_string = re.sub(r'\b\d{4}\b', '', input_string)
-    # Split the string into words
     words = output_string.split()
-    # Initialize a list to keep track of unique words
     unique_words = []
-    # Iterate over the words in the string
     for word in words:
-        # Check if the word is already in the unique_words list
         if word not in unique_words:
-            # If it's not, add it to the list
             unique_words.append(word)
-    # Join the unique words back together into a string
     output_string = ' '.join(unique_words)
-
-    # Remove copyright characters
     output_string = re.sub(r'[™©®℗]', '', output_string)
-
     output_string = output_string.split(', ')[0].strip()
-
     return output_string
-
 
 def download_torrent(runDir, torrent_id, api_key):
     url = 'https://redacted.ch/ajax.php?action=download'
     headers = {'Authorization': api_key}
-
     params = {'id': torrent_id}
-
     response = requests.get(url, params=params, headers=headers)
-
     if response.status_code == 200:
-        # Extract the filename from the Content-Disposition header
         header = response.headers.get('Content-Disposition')
         if header:
             filename = unquote(header.split('filename=')[1])
@@ -597,31 +769,29 @@ def download_torrent(runDir, torrent_id, api_key):
         print('Error downloading file')
         return None
 
-
 def get_release_year(path):
     release_year = None
-    for filename in os.listdir(path):
-        if filename.endswith(".mp3"):
-            audio = EasyID3(os.path.join(path, filename))
-            release_year = int(audio.get('date')[0][:4])
-            break
-        elif filename.endswith(".flac"):
-            audio = FLAC(os.path.join(path, filename))
+    for filename in sorted(os.listdir(path)):
+        file_path = os.path.join(path, filename)
+        if filename.lower().endswith(".mp3"):
+            audio = EasyID3(file_path)
+            if 'date' in audio:
+                release_year = int(audio.get('date')[0][:4])
+                return release_year
+        elif filename.lower().endswith(".flac"):
+            audio = FLAC(file_path)
             if 'year' in audio:
                 release_year = int(audio['year'][0])
-            else:
-                if 'date' in audio:
-                    if len(audio['date'][0]) == 4:
-                        release_year = int(audio['date'][0])
-            break
-        else:
-            continue  # Skip files that are not MP3 or FLAC
+                return release_year
+            elif 'date' in audio:
+                release_year = int(audio['date'][0][:4])
+                return release_year
 
     if release_year is None:
-        logging.error("No release year found please enter 4 digit release year")
-        release_year = int(input())
+        logging.error("No release year found in any file. Please check the metadata.")
+        print_all_metadata_path(path) # Print metadata for debugging
+        release_year = int(input("Please enter the 4-digit release year manually:\n"))
     return release_year
-
 
 def get_genre(path):
     for filename in os.listdir(path):
@@ -631,701 +801,229 @@ def get_genre(path):
         elif filename.endswith(".flac"):
             audio = FLAC(os.path.join(path, filename))
             break
-        else:
-            continue  # Skip files that are not MP3 or FLAC
     try:
         genre = audio['genre'][0]
         genre = genre.replace('Alternatif et Indé', 'Alternative, Indie')
         genre = genre.replace('Bandes originales de films', 'Stage and Screen')
-    except KeyError:
+    except (KeyError, NameError):
         logging.error("No genre found, please give genres comma separated")
         genre = input()
     return genre.lower()
 
-
 def detect_audio_format(path):
-    mp3_extensions = {'.mp3', '.mp2', '.mpga'}
-    flac_extensions = {'.flac'}
-    mp3_mime_types = {'audio/mpeg', 'audio/mp3'}
-    flac_mime_types = {'audio/flac', 'audio/x-flac'}
-
     for filename in os.listdir(path):
         filepath = os.path.join(path, filename)
         if os.path.isfile(filepath):
             ext = os.path.splitext(filename)[1].lower()
-            mime_type = mutagen.File(filepath).mime[0].lower()
-
-            if ext in mp3_extensions or mime_type in mp3_mime_types:
-                return "MP3"
-            elif ext in flac_extensions or mime_type in flac_mime_types:
-                return "FLAC"
+            if ext in {'.mp3', '.mp2', '.mpga'}: return "MP3"
+            if ext in {'.flac'}: return "FLAC"
     return None
 
-
 def get_album_type(folder_path):
-    """Determine if a folder of audio files is an album, EP, or single.
-
-    Parameters:
-    folder_path (str or list): Path to the folder(s) containing audio files, or an array of folder paths.
-
-    Returns:
-    str: 'Album', 'EP', or 'Single'.
-    """
+    audio_files = []
     if isinstance(folder_path, list):
-        # If folder_path is an array, consider all the songs in all the given paths
-        audio_files = []
         for path in folder_path:
-            for filename in os.listdir(path):
-                if filename.endswith('.mp3') or filename.endswith('.flac'):
-                    audio_files.append(os.path.join(path, filename))
+            audio_files.extend([os.path.join(path, f) for f in os.listdir(path) if f.endswith(('.mp3', '.flac'))])
     else:
-        # If folder_path is a single folder path, consider the songs in that path only
-        audio_files = []
-        for filename in os.listdir(folder_path):
-            if filename.endswith('.mp3') or filename.endswith('.flac'):
-                audio_files.append(os.path.join(folder_path, filename))
+        audio_files.extend([os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.mp3', '.flac'))])
 
-    if not audio_files:
-        raise ValueError(f"No audio files found in {folder_path}")
+    if not audio_files: raise ValueError(f"No audio files found in {folder_path}")
 
     track_numbers = set()
     for audio_file in audio_files:
         try:
-            if audio_file.endswith(".mp3"):
-                audio = EasyID3(audio_file)
-            elif audio_file.endswith(".flac"):
-                audio = FLAC(audio_file)
-            track_numbers.add(audio.get("tracknumber", [])[0])
+            audio = mutagen.File(audio_file)
+            track_numbers.add(audio.get("tracknumber", [""])[0].split('/')[0])
         except Exception:
             pass
-
-    if not track_numbers:
-        raise ValueError("No track numbers found in audio files")
-
-    newTrackNums = []
-    for num, track in enumerate(track_numbers):
-        if '/' in track:
-            track = track.split('/')[0]
-        newTrackNums.append(track)
-
-    if len(track_numbers) < 3:
-        return "Single"
-    elif all(int(track_number) <= 5 for track_number in newTrackNums):
-        return "EP"
-    else:
-        return "Album"
-
+    
+    if not track_numbers: raise ValueError("No track numbers found in audio files")
+    
+    track_numbers = {int(t) for t in track_numbers if t.isdigit()}
+    if len(track_numbers) < 3: return "Single"
+    if len(track_numbers) <= 5: return "EP"
+    return "Album"
 
 def get_audio_files(path):
     audio_files = []
     for root, dirs, files in os.walk(path):
         for file in files:
-            if file.endswith(".mp3") or file.endswith(".flac"):
+            if file.endswith((".mp3", ".flac")):
                 audio_files.append(os.path.join(root, file))
     return audio_files
 
-
 def get_bitrate_or_lossless(path):
     audio_files = get_audio_files(path)
-    print(audio_files)
-    if not audio_files:
-        return None
-
+    if not audio_files: return None
     for file_path in audio_files:
         audio = mutagen.File(file_path)
-        print(audio)
-        if audio is None:
-            continue
-        if audio.mime[0] == "audio/mp3":
-            bitrate = audio.info.bitrate // 1000
-            if bitrate == 320 or bitrate == 256 or bitrate == 192:
-                return str(bitrate)
-        elif audio.mime[0] == "audio/flac":
-            bit_depth = audio.info.bits_per_sample
-            if bit_depth == 16:
-                return "Lossless"
-            elif bit_depth == 24:
-                return "24bit Lossless"
+        if audio:
+            if audio.mime[0] == "audio/mp3":
+                bitrate = audio.info.bitrate // 1000
+                if bitrate in {320, 256, 192}: return str(bitrate)
+            elif audio.mime[0] == "audio/flac":
+                bit_depth = audio.info.bits_per_sample
+                if bit_depth == 16: return "Lossless"
+                if bit_depth == 24: return "24bit Lossless"
     return None
-
 
 def check_file_path_length(folder_path):
     for root, dirs, files in os.walk(folder_path):
         for file_name in files:
-            path_length = len(os.path.basename(root)) + len(file_name)
-            if path_length > 180:
+            if len(os.path.basename(root)) + len(file_name) > 180:
                 return False
     return True
 
-
-def upload_music_data(runDir, releaseGroup, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, redGroupId=None, ogyear=None, noDesc=False, skipPrompts=False):
-    url = "https://redacted.ch/ajax.php?action=upload"
-
-    albumDesc = open(runDir + "trackData.txt", 'r', encoding='UTF-8').read()
-    albumDesc = albumDesc.replace('\u2008', ' ')
-    if releaseGroup:
-        musicBrainzURL = "https://musicbrainz.org/release-group/" + releaseGroup
-
-        albumDesc = albumDesc + "\n\n\n" + f"[url={musicBrainzURL}]MusicBrainz Release Group[/url]"
-
-    if 'remix' in title.lower():
-        releasetype = 'Remix'
-
-    release_types = {
-        'Album': 1,
-        'Soundtrack': 3,
-        'EP': 5,
-        'Anthology': 6,
-        'Compilation': 7,
-        'Single': 9,
-        'Live album': 11,
-        'Remix': 13,
-        'Bootleg': 14,
-        'Interview': 15,
-        'Mixtape': 16,
-        'Demo': 17,
-        'Concert Recording': 18,
-        'DJ Mix': 19,
-        'Unknown': 21
-    }
-
-    releasetype = release_types.get(releasetype, None)
-
-    tags: str = format_genres(tags)
-    if len(tags) > 0:
-        tags += ", " + str(year)[:3] + '0s'
-    else:
-        tags = str(year)[:3] + '0s'
-    logging.info("Tags: " + tags)
-    artists = artists.split(', ')
-    print(artists)
-    if len(artists) == 1:
-        importance = ['Main']
-    else:
-        importance = ['Main' for _ in range(len(artists))]
-
-    importance = convert_roles_to_int(importance)
-    remasteryear = year
-    if ogyear:
-        year = ogyear
-
-    headers = {
-        "Authorization": api,
-    }
-
-    data = {
-        'type': 0,
-        'title': title,
-        'year': year,
-        'remaster_year': remasteryear,
-        'releasetype': releasetype,
-        'format': audioFormat,
-        'bitrate': bitrate,
-        'media': media,
-        'image': image,
-        'tags': tags,
-        'album_desc': albumDesc
-    }
-
-    if noDesc:
-        data.pop('album_desc')
-
-    if redGroupId:
-        data['groupid'] = redGroupId
-
-    if recordLabel:
-        if len(recordLabel) < 2 or len(recordLabel) > 80:
-            recordLabel = input("Gotten record label too long or too short for RED\nGotten label: " + recordLabel + "\nPlease input a record label:\n")
-        if 'records dk' in recordLabel.lower():
-            logging.info("Distro Kid release detected. Setting to Self-Released")
-            recordLabel = 'Self-Released'
-        if artists[0].lower() == recordLabel.lower():
-            logging.info("Self release detected. Setting to Self-Released")
-            recordLabel = 'Self-Released'
-
-        data['remaster_record_label'] = recordLabel
-
-    if len(artists) == 1:
-        data["artists[0]"] = artists[0]
-    else:
-        for num, artist in enumerate(artists):
-            data[f"artists[{num}]"] = artist
-
-    for num, importNum in enumerate(importance):
-        data[f"importance[{num}]"] = importNum
-
-    torrent_file = {'file_input': open(torrent_file, 'rb')}
-
-    pprint(data)
-    if skipPrompts or getUserInput("Do you want to upload this to RED?"):
-        response = requests.post(headers=headers, url=url, data=data, files=torrent_file)
-        return response
-    else:
-        return None
-
-
-def sanitize_filename(filename):
-    """
-    Sanitizes a filename by removing any Unicode characters that are not allowed in file names
-    and replacing them with an underscore.
-    """
-    # Define a regular expression that matches any Unicode character that is not allowed in file names
-    # The expression matches any character that is not a letter, digit, space, or one of the following symbols: -._~()
-    pattern = r'[^\w\d\s\-._~()]'
-
-    # Replace any matching characters with an underscore
-    sanitized = re.sub(pattern, '_', filename)
-
-    return sanitized
-
-
-def sanitize_filenames(directory):
-    """
-    Sanitizes the filenames in the specified directory by removing any Unicode characters that are not allowed
-    in file names and replacing them with an underscore.
-    """
-    # Get list of filenames in the directory
-    filenames = os.listdir(directory.encode('utf-8'))
-
-    # Iterate over filenames and sanitize them
-    for filename in filenames:
-        sanitized_filename = sanitize_filename(filename)
-        if sanitized_filename != filename:
-            logging.info("Renaming file: " + sanitized_filename)
-            os.rename(os.path.join(directory, filename), os.path.join(directory, sanitized_filename))
-
-
 def format_genres(genre_str):
-    genres = genre_str.split(', ')
-    formatted_genres = []
-    for genre in genres:
-        split_genres = genre.split('/')
-        for split_genre in split_genres:
-            formatted_genres.append(split_genre.replace(' ', '.').lower())
+    # Replace common separators with commas first
+    processed_str = genre_str.replace('/', ',').replace('&', ',')
+    genres = processed_str.split(',')
+    # Format each genre tag: strip whitespace, replace spaces with dots, convert to lowercase
+    formatted_genres = [g.strip().replace(' ', '.').lower() for g in genres if g.strip()]
+    # Join the cleaned tags back into a single string
     return ', '.join(formatted_genres)
 
-
 def convert_roles_to_int(roles_list):
-    roles_dict = {
-        "Main": 1,
-        "Guest": 2,
-        "Composer": 4,
-        "Conductor": 5,
-        "DJ / Compiler": 6,
-        "Remixer": 3,
-        "Producer": 7
-    }
-    return [roles_dict.get(role, None) for role in roles_list]
-
+    roles_dict = { "Main": 1, "Guest": 2, "Composer": 4, "Conductor": 5, "DJ / Compiler": 6, "Remixer": 3, "Producer": 7 }
+    return [roles_dict.get(role, 1) for role in roles_list]
 
 def get_first_song_album(folder_path):
-    # Loop through all files in the folder
-    for file_name in os.listdir(folder_path):
-        # Check if the file is an MP3 or FLAC file
-        if file_name.endswith(".mp3"):
-            audio = EasyID3(os.path.join(folder_path, file_name))
-        elif file_name.endswith(".flac"):
-            audio = FLAC(os.path.join(folder_path, file_name))
-        else:
-            continue  # Skip files that are not MP3 or FLAC
-
-        # Check if the file is the first track in the album
-        if audio.get("tracknumber", [])[0] == "01" or "1/" in audio.get("tracknumber", [])[0]:
-            # Get the album name from the metadata
-            album = audio.get("album", [])
-            if isinstance(album, list) and len(album) > 0 and isinstance(album[0], str):
-                return album[0]
-
-    # Return None if no first track is found
+    for file_name in sorted(os.listdir(folder_path)):
+        if file_name.endswith((".mp3", ".flac")):
+            audio = mutagen.File(os.path.join(folder_path, file_name))
+            if audio and 'album' in audio:
+                return audio['album'][0]
     return None
 
-
 def print_all_metadata_path(path):
-    music_files = [f for f in os.listdir(path) if f.endswith('.mp3') or f.endswith('.m4a') or f.endswith('.flac')]
-
-    for file in music_files:
-        print_all_metadata(os.path.join(path, file))
-
+    for file in sorted(os.listdir(path)):
+        if file.endswith(('.mp3', '.m4a', '.flac')):
+            print_all_metadata(os.path.join(path, file))
 
 def print_all_metadata(file_path):
-    # Check the file extension and load the appropriate metadata format
-    if file_path.endswith(".mp3"):
-        audio = EasyID3(file_path)
-    elif file_path.endswith(".flac"):
-        audio = FLAC(file_path)
-    else:
-        print("Unsupported file type:", file_path)
-        return
-
-    # Loop through all the metadata fields and print their names and values
+    audio = mutagen.File(file_path)
     pprint(audio)
-    # for key, value in audio.items():
-    #     print(key + ": " + str(value))
-
 
 def get_first_song_artist(folder_path):
-    # Loop through all files in the folder
-    for file_name in os.listdir(folder_path):
-        # Check if the file is an MP3 or FLAC file
-        if file_name.endswith(".mp3"):
-            audio = EasyID3(os.path.join(folder_path, file_name))
-        elif file_name.endswith(".flac"):
-            audio = FLAC(os.path.join(folder_path, file_name))
-        else:
-            continue  # Skip files that are not MP3 or FLAC
-
-        # Check if the file is the first track in the album
-        if audio.get("tracknumber", [])[0] == "01" or "1/" in audio.get("tracknumber", [])[0]:
-            # Get the artist name from the metadata
-            artist = audio.get("albumartist", [])
-            if isinstance(artist, list) and len(artist) > 0 and isinstance(artist[0], str):
-                return artist[0]
-            if audio.get("artist"):
-                return audio.get("artist")[0]
-
-    # Return None if no first track is found
-    logging.error("No suitable track found. This is the metadata of the files for debugging...")
-    for file_name in os.listdir(folder_path):
-        if file_name.endswith(".mp3") or file_name.endswith(".flac"):
-            logging.info("Scanning metadata of file: " + os.path.join(folder_path, file_name))
-            print_all_metadata(os.path.join(folder_path, file_name))
-
+    for file_name in sorted(os.listdir(folder_path)):
+        if file_name.endswith((".mp3", ".flac")):
+            audio = mutagen.File(os.path.join(folder_path, file_name))
+            if audio:
+                if 'albumartist' in audio: return audio['albumartist'][0]
+                if 'artist' in audio: return audio['artist'][0]
+    logging.error("No suitable artist found.")
+    return None
 
 def find_album_match(artist_name, album_name):
-    # Search for the artist on MusicBrainz
     try:
-        search_results = mb.search_artists(artist_name)
-
-        # Check if any results were found
-        if len(search_results["artist-list"]) == 0:
-            print("No results found for artist:", artist_name)
-            return None
-
-        # Get the ID of the best match artist
-        foundArtistName = None
-        for result in search_results["artist-list"]:
-            resultArtistName = mb.get_artist_by_id(result['id'])
-            if similarity(resultArtistName['artist']['name'], artist_name) > 95:
-                logging.info("Artist name match found: " + resultArtistName['artist']['name'])
-                foundArtistName = resultArtistName['artist']['name']
+        artist_results = mb.search_artists(artist_name)
+        if not artist_results["artist-list"]: return None
+        
+        best_artist = None
+        for result in artist_results["artist-list"]:
+            if similarity(result['name'], artist_name) > 95:
+                best_artist = result
                 break
+        if not best_artist: return None
 
-        if not foundArtistName:
-            logging.info("No sufficient artist name found.")
-            return None
+        album_results = mb.search_releases(artist=best_artist['name'], release=album_name)
+        if not album_results["release-list"]: return None
 
-        artist_id = resultArtistName['artist']['id']
-        print("Best match artist ID:", artist_id)
-
-        # Search for the album by the artist on MusicBrainz
-        album_results = mb.search_releases(artist=resultArtistName['artist']['name'], release=album_name)
-
-        # Check if any results were found
-        if len(album_results["release-list"]) == 0:
-            print("No results found for album:", album_name)
-            return None
-
-        # Get the ID of the best match album
-        best_match = None
         for result in album_results['release-list']:
-            if resultArtistName['artist']['name'] in str(result):
-                best_match = result
-        if not best_match:
-            logging.info("No album with correct artist found.")
-            return None
-
-        album_id = best_match["id"]
-        print("Best match album ID:", album_id)
-
-        # Get the release group ID from the album information
-        release_group_id = best_match["release-group"]["id"]
-        print("Release group ID:", release_group_id)
-
-        # Get the full release group information from MusicBrainz
-        release_group_info = mb.get_release_group_by_id(release_group_id)
-        pprint(release_group_info)
-    except Exception:
-        logging.error("Error hit. SKipping matching...")
-        return None
-
-    return release_group_info
-
+            if best_artist['name'] in [a['name'] for a in result['artist-credit']]:
+                return mb.get_release_group_by_id(result["release-group"]["id"])
+    except Exception as e:
+        logging.error(f"MusicBrainz search failed: {e}")
+    return None
 
 def check_missing_tracks(directory):
-    """Checks if there are any missing tracks in a directory of music files.
-
-    Args:
-        directory (str): The directory to search for music files.
-
-    Returns:
-        A list of missing track numbers, or an empty list if no tracks are missing.
-    """
-    # Create a list of all music files in the directory
-    music_files = [f for f in os.listdir(directory) if f.endswith('.mp3') or f.endswith('.m4a') or f.endswith('.flac')]
-
-    # Create a list of track numbers for each file
+    music_files = [f for f in os.listdir(directory) if f.endswith(('.mp3', '.m4a', '.flac'))]
     track_numbers = []
     for file in music_files:
-        # Extract the track number from the file's metadata
-        file_path = os.path.join(directory, file)
         try:
-            tags = mutagen.File(file_path)
+            tags = mutagen.File(os.path.join(directory, file))
             track_number = tags['tracknumber'][0].split('/')[0]
             if track_number.isdigit():
                 track_numbers.append(int(track_number))
         except Exception:
             pass
-
-    # Check if there are any missing track numbers
     missing_tracks = []
-    for i in range(1, len(track_numbers) + 1):
-        if i not in track_numbers:
-            missing_tracks.append(i)
-
+    if track_numbers:
+        for i in range(1, max(track_numbers) + 1):
+            if i not in track_numbers:
+                missing_tracks.append(i)
     return missing_tracks
 
-
 def add_track_position(folder_path):
-    """
-    This function takes a folder path as input and adds the track position to the file name if it's not there already.
-    The track position is added at the beginning of the file name, followed by a space and a dash.
-    For example, if the file name is "song.mp3" and it's the third track in the folder, it will be renamed to "03 - song.mp3".
-    """
-    # Get a list of all the files in the folder
-    files = os.listdir(folder_path)
-
-    # Filter for only music files (you can customize this depending on the file extensions you want to look for)
-    music_files = [f for f in files if f.endswith('.mp3') or f.endswith('.wav') or f.endswith('.flac')]
-
-    # Loop over the music files and add the track position to the file name if it's not already there
+    music_files = sorted([f for f in os.listdir(folder_path) if f.endswith(('.mp3', '.wav', '.flac'))])
     for i, file_name in enumerate(music_files):
-        # Check if the track position is already in the file name (we assume it's a two-digit number)
-        if file_name[0:2].isdigit():
-            # If it is, skip this file
-            continue
-
-        # If the track position isn't already in the file name, add it
-        track_position = str(i + 1).zfill(2)  # Add leading zeros if necessary
-        new_file_name = f"{track_position} - {file_name}"
-        old_path = os.path.join(folder_path, file_name)
-        new_path = os.path.join(folder_path, new_file_name)
-        os.rename(old_path, new_path)
-        logging.info("File renamed: " + new_path)
-
+        if not file_name[:2].isdigit():
+            track_position = str(i + 1).zfill(2)
+            new_file_name = f"{track_position} - {file_name}"
+            os.rename(os.path.join(folder_path, file_name), os.path.join(folder_path, new_file_name))
+            logging.info(f"Renamed to: {new_file_name}")
     logging.info("Track positions added successfully!")
 
-
 def create_track_list(folder_path, output_file):
-    """
-    This function takes a folder path (or an array of folder paths) and an output file name as input, and creates a
-    formatted list of every track found in the folders along with its position and length, and writes the list to the
-    output file.
-    """
-    # Check if folder_path is an array
-    if isinstance(folder_path, list):
-        # Initialize an empty list to store all the track information
-        track_list = []
-
-        # Loop over each folder path in the array
-        for path in folder_path:
-            # Get the disc number from the folder path
-            disc_number = os.path.basename(path).split(" ")[-1]
-
-            # Get a list of all the files in the folder
-            files = os.listdir(path)
-
-            # Filter for only music files (you can customize this depending on the file extensions you want to look for)
-            music_files = [f for f in files if f.endswith('.mp3') or f.endswith('.wav') or f.endswith('.flac')]
-
-            # Sort the music files alphabetically
-            music_files.sort()
-
-            track_list.append(f"Disk {disc_number}:")
-
-            # Loop over the music files and extract the track information
-            for i, file_name in enumerate(music_files):
-                # Get the track position
-                track_position = str(i + 1).zfill(2)
-
-                # Get the track length in seconds
-                if file_name.endswith('.mp3'):
-                    # For MP3 files, use Mutagen to extract the track length
-                    audio = MP3(os.path.join(path, file_name))
-                    track_length = int(audio.info.length)
-                    title = audio.get('TIT2', [file_name])[0]
-                elif file_name.endswith('.flac'):
-                    # For FLAC files, use Mutagen to extract the track length from the STREAMINFO block
-                    audio = FLAC(os.path.join(path, file_name))
-                    track_length = int(audio.info.length)
-                    title = audio.get('title', [file_name])[0]
-                else:
-                    # For other file types, use os.path.getsize() to get the file size in bytes and estimate the length
-                    file_size = os.path.getsize(os.path.join(path, file_name))
-                    track_length = int(file_size / 1000000) * 4  # 4 seconds per MB, this is just an estimate
-                    title = file_name
-
-                # Convert the track length from seconds to a formatted string (XX:XX)
-                minutes = str(track_length // 60).zfill(2)
-                seconds = str(track_length % 60).zfill(2)
-                track_length_str = f"{minutes}:{seconds}"
-
-                # Add the track information to the track_list, including the disc number
-                track_list.append(f"\n\t{track_position}. {title} ({track_length_str})")
-
-    else:
-        # Get a list of all the files in the folder
-        files = os.listdir(folder_path)
-
-        # Filter for only music files (you can customize this depending on the file extensions you want to look for)
-        music_files = [f for f in files if f.endswith('.mp3') or f.endswith('.wav') or f.endswith('.flac')]
-
-        # Sort the music files alphabetically
-        music_files.sort()
-
-        # Initialize an empty list to store the track information
-        track_list = []
-
-        # Loop over the music files and extract the track information
+    track_list = []
+    
+    def process_folder(path, disc_prefix=""):
+        music_files = sorted([f for f in os.listdir(path) if f.endswith(('.mp3', '.wav', '.flac'))])
         for i, file_name in enumerate(music_files):
-            # Get the track position
+            audio = mutagen.File(os.path.join(path, file_name))
+            track_length = int(audio.info.length)
+            minutes, seconds = divmod(track_length, 60)
+            track_length_str = f"{int(minutes):02d}:{int(seconds):02d}"
+            title = audio.get('title', [os.path.splitext(file_name)[0]])[0]
             track_position = str(i + 1).zfill(2)
+            track_list.append(f"{disc_prefix}{track_position}. {title} ({track_length_str})")
 
-            # Get the track length in seconds
-            if file_name.endswith('.mp3'):
-                # For MP3 files, use Mutagen to extract the track length
-                audio = MP3(os.path.join(folder_path, file_name))
-                track_length = int(audio.info.length)
-                title = audio.get('TIT2', [file_name])[0]
-            elif file_name.endswith('.flac'):
-                # For FLAC files, use Mutagen to extract the track length from the STREAMINFO block
-                audio = FLAC(os.path.join(folder_path, file_name))
-                track_length = int(audio.info.length)
-                title = audio.get('title', [file_name])[0]
-            else:
-                # For other file types, use os.path.getsize() to get the file size in bytes and estimate the length
-                file_size = os.path.getsize(os.path.join(folder_path, file_name))
-                track_length = int(file_size / 1000000) * 4  # 4 seconds per MB, this is just an estimate
-                title = file_name
+    if isinstance(folder_path, list):
+        for path in folder_path:
+            disc_number = os.path.basename(path).split(" ")[-1]
+            track_list.append(f"\nDisk {disc_number}:")
+            process_folder(path)
+    else:
+        process_folder(folder_path)
 
-            # Convert the track length from seconds to a formatted string (XX:XX)
-            minutes = str(track_length // 60).zfill(2)
-            seconds = str(track_length % 60).zfill(2)
-            track_length_str = f"{minutes}:{seconds}"
-
-            # Add the track information to the track_list
-            track_list.append(f"{track_position}. {title} ({track_length_str})")
-
-    # Write the track_list to the output file
     with open(output_file, 'w', encoding='UTF-8') as f:
         f.write('\n'.join(track_list))
-
     logging.info(f"Track list written to {output_file} successfully!")
 
-
-def ftp_copy_folder(local_folder_path, host, port, username, password):
-    remote_folder_path = '/downloads/qbittorrent'  # Destination folder on the remote host
-
-    logging.info("Local path: " + local_folder_path)
-    logging.info("Host: " + host)
-    logging.info("Port: " + str(port))
-    logging.info("Username: " + username)
-    logging.info("Password: " + password)
-
-    ftp = FTP_TLS()
-    ftp.connect(host, port)
-    ftp.login(username, password)
-    ftp.prot_p()
-    ftp.cwd(remote_folder_path)
-
-    logging.info("Creating directory: " + os.path.basename(local_folder_path))
+def ftp_copy_folder(local_folder_path, host, port, username, password, remote_path='/downloads/qbittorrent'):
+    remote_folder_path = remote_path
     try:
-        ftp.mkd(os.path.basename(local_folder_path))
-    except Exception:
-        # TODO: Add a check if the folder already exists
-        logging.error("Failed to make directory, it probably already exists")
+        with FTP_TLS() as ftp:
+            ftp.connect(host, port)
+            ftp.login(username, password)
+            ftp.prot_p()
+            ftp.cwd(remote_folder_path)
+            
+            remote_target_dir = os.path.join(remote_folder_path, os.path.basename(local_folder_path))
+            try:
+                ftp.mkd(os.path.basename(local_folder_path))
+            except Exception:
+                logging.warning(f"Directory {os.path.basename(local_folder_path)} likely already exists.")
 
-    destination_path = remote_folder_path + '/' + os.path.basename(local_folder_path)
+            for root, dirs, files in os.walk(local_folder_path):
+                relative_path = os.path.relpath(root, local_folder_path)
+                remote_dir = os.path.join(remote_target_dir, relative_path) if relative_path != '.' else remote_target_dir
+                
+                for d in dirs:
+                    try:
+                        ftp.mkd(os.path.join(remote_dir, d))
+                    except Exception:
+                        pass # Ignore if exists
 
-    for root, dirs, files in os.walk(local_folder_path):
-        # Create corresponding directories in the destination path
-        relative_path = os.path.relpath(root, local_folder_path)
-        if relative_path != '.':
-            destination_dir = destination_path + '/' + relative_path
-            logging.info("Creating sub directory: " + destination_dir)
-            ftp.mkd(destination_dir)  # Create directory on FTP server
-        else:
-            destination_dir = destination_path
-            print(destination_dir)
-
-        # Copy files to their corresponding locations
-        for file in files:
-            source_file = os.path.join(root, file)
-            destination_file = destination_dir + '/' + file
-            logging.info("Uploading: " + source_file)
-            with open(source_file, 'rb') as f:
-                ftp.storbinary('STOR ' + destination_file, f)  # Upload file to FTP server
-            logging.info("Uploaded to: " + destination_file)
-
-
-def ftp_copy_folder_original(local_folder_path, host, port, username, password):
-    remote_folder_path = '/downloads/qbittorrent'  # Destination folder on the remote host
-
-    logging.info("Local path: " + local_folder_path)
-    logging.info("Host: " + host)
-    logging.info("Port: " + str(port))
-    logging.info("Username: " + username)
-    logging.info("Password: " + password)
-
-    # Connect to the FTP server
-    ftp = FTP_TLS()
-    ftp.connect(host, port)
-    ftp.login(username, password)
-    ftp.prot_p()
-    ftp.retrlines('LIST')
-    logging.info(ftp.pwd())
-    # Create the remote folder if it doesn't exist
-    remote_dir = os.path.join(remote_folder_path)
-    ftp.cwd(remote_dir)
-    logging.info("Creating directory: " + os.path.basename(local_folder_path))
-    try:
-        ftp.mkd(os.path.basename(local_folder_path))
-    except Exception:
-        # TODO: Add a check if the folder already exists
-        logging.error("Failed to make directory, it probably already exists")
-    remote_dir = remote_folder_path + '/' + os.path.basename(local_folder_path)
-
-    # for os.path.
-
-    for root, dirs, files in os.walk(local_folder_path):
-        relative_path = os.path.relpath(root, local_folder_path)
-        remote_dir = os.path.join(remote_folder_path, relative_path)
-
-        # Create remote directories if they don't exist
-        try:
-            ftp.mkd(remote_dir)
-        except:
-            pass
-
-        # Change remote working directory
-        ftp.cwd(remote_dir)
-
-        # Upload files
-        for file in files:
-            local_file_path = os.path.join(root, file)
-            with open(local_file_path, 'rb') as local_file:
-                ftp.storbinary(f'STOR {file}', local_file)
-                print("\n")
-                logging.info(f"Uploaded file: {file}")
-
-    # Disconnect from the FTP server
-    ftp.quit()
-    logging.info("Folder copied successfully!")
-
-
-def upload_file(ftp, local_file_path, remote_file_name):
-    with open(local_file_path, 'rb') as local_file:
-        ftp.storbinary(f'STOR {remote_file_name}', local_file)
-
+                for file in files:
+                    local_file = os.path.join(root, file)
+                    remote_file = os.path.join(remote_dir, file)
+                    with open(local_file, 'rb') as f:
+                        ftp.storbinary(f'STOR {remote_file}', f)
+                    logging.info(f"Uploaded {file} to {remote_file}")
+        logging.info("Folder copied successfully!")
+    except Exception as e:
+        logging.error(f"FTP copy failed: {e}")
 
 if __name__ == "__main__":
     main()

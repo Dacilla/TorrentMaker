@@ -38,8 +38,194 @@ from torrent_utils.helpers import (
 from torrent_utils.media import Movie, TVShow
 
 __VERSION = "2.1.3"
+HUNO_API_URL = "https://hawke.uno/api/torrents/upload"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Maps --source argument (case-insensitive) to HUNO source_type IDs
+SOURCE_TYPE_MAP = {
+    'uhd bluray': 1, 'uhd blu-ray': 1, 'uhd bluray hybrid': 2, 'uhd blu-ray hybrid': 2,
+    'bluray': 3, 'blu-ray': 3, 'bluray hybrid': 4, 'blu-ray hybrid': 4,
+    'hd-dvd': 5, 'hd dvd': 5, 'hd-dvd hybrid': 6,
+    'dvd9': 7, 'dvd5': 8, 'dvd': 13,
+    'web-dl': 9, 'webdl': 9, 'web-dl hybrid': 10, 'webdl hybrid': 10,
+    'hdtv': 11, 'sdtv': 12,
+}
+
+# Maps resolution string to HUNO resolution_id
+RESOLUTION_ID_MAP = {
+    "4320p": 1, "2160p": 2, "1080p": 3, "1080i": 4,
+    "720p": 5, "576p": 6, "576i": 7, "480p": 8, "480i": 9,
+}
+
+# Known streaming service filename tokens → canonical abbreviation
+STREAMING_SERVICES = {
+    'amzn': 'AMZN', 'amazon': 'AMZN',
+    'nf': 'NF', 'netflix': 'NF',
+    'dsnp': 'DSNP',
+    'hmax': 'HMAX',
+    'pcok': 'PCOK', 'peacock': 'PCOK',
+    'atvp': 'ATVP',
+    'hulu': 'HULU',
+    'vudu': 'VUDU',
+    'pmtp': 'PMTP',
+    'stan': 'STAN',
+    'crav': 'CRAV',
+    'cr': 'CR',
+    'itunes': 'iTunes', 'itunes': 'iT',
+    'aius': 'AIUS',
+}
+
+# HUNO type_id values
+_HUNO_TYPE_DISC = 1
+_HUNO_TYPE_REMUX = 2
+_HUNO_TYPE_WEB = 3
+_HUNO_TYPE_ENCODE = 15
+
+
+def _get_huno_type_id(source: str, video_codec: str) -> int:
+    """Determines the HUNO type_id from the source and video codec.
+
+    type_id represents the *content type* (DISC/REMUX/WEB/ENCODE),
+    not the codec. Codec is sent as a separate field.
+    """
+    source_lower = source.lower() if source else ""
+    if 'remux' in source_lower:
+        return _HUNO_TYPE_REMUX
+    if 'web' in source_lower:
+        return _HUNO_TYPE_WEB
+    if video_codec in ('x264', 'x265', 'AV1'):
+        return _HUNO_TYPE_ENCODE
+    return _HUNO_TYPE_WEB  # Safe fallback
+
+
+def detect_source_from_filename(filename: str) -> str:
+    """Attempts to detect source type (and streaming service) from a filename.
+    Returns e.g. 'AMZN WEB-DL', 'BluRay Remux', 'NF WEB-DL', or '' on failure.
+    """
+    name = filename.upper()
+    tokens_upper = set(re.split(r'[\.\s\-_\(\)\[\]]', name))
+
+    base_source = ''
+    if re.search(r'\bUHD[\.\s]BLU[\-\s]?RAY\b|\bUHD[\.\s]BLURAY\b', name):
+        base_source = 'UHD BluRay'
+        if 'REMUX' in tokens_upper:
+            base_source = 'UHD BluRay Remux'
+    elif re.search(r'\bBLU[\-\s]?RAY\b|\bBLURAY\b|\bBDREMUX\b', name):
+        base_source = 'BluRay'
+        if 'REMUX' in tokens_upper or 'BDREMUX' in tokens_upper:
+            base_source = 'BluRay Remux'
+    elif re.search(r'\bBDRIP\b', name):
+        base_source = 'BluRay'
+    elif re.search(r'\bWEB[\.\-]DL\b|\bWEBDL\b', name):
+        base_source = 'WEB-DL'
+    elif re.search(r'\bWEBRIP\b|\bWEB[\.\-]RIP\b', name):
+        base_source = 'WEBRip'
+    elif re.search(r'\bHDTV\b', name):
+        base_source = 'HDTV'
+    elif re.search(r'\bSDTV\b', name):
+        base_source = 'SDTV'
+    elif re.search(r'\bHD[\.\-]DVD\b|\bHDDVD\b', name):
+        base_source = 'HD-DVD'
+    elif re.search(r'\bDVD\b', name):
+        base_source = 'DVD'
+
+    if not base_source:
+        return ''
+
+    streaming_service = ''
+    for token in re.split(r'[\.\s\-_\(\)\[\]]', filename):
+        svc = STREAMING_SERVICES.get(token.lower())
+        if svc:
+            streaming_service = svc
+            break
+
+    return f"{streaming_service} {base_source}" if streaming_service else base_source
+
+
+def find_previous_run(canonical_path: str, runs_dir: str = "runs") -> str | None:
+    """Searches for the most recent run directory that processed the same source path."""
+    if not os.path.isdir(runs_dir):
+        return None
+    canonical = os.path.normpath(canonical_path)
+    matching = []
+    for d in os.listdir(runs_dir):
+        meta_path = os.path.join(runs_dir, d, "source_path.txt")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    if os.path.normpath(f.read().strip()) == canonical:
+                        matching.append(os.path.join(runs_dir, d))
+            except OSError:
+                continue
+    return sorted(matching)[-1] if matching else None
+
+
+def _resolve_source_type_id(source: str) -> int | None:
+    """Resolves a source string to a HUNO source_type_id.
+    Handles service prefixes ('AMZN WEB-DL' → 'WEB-DL' → 9) and
+    remux suffixes ('BluRay Remux' → 'BluRay' → 3).
+    """
+    if not source:
+        return None
+    s = source.lower().strip()
+    if s in SOURCE_TYPE_MAP:
+        return SOURCE_TYPE_MAP[s]
+    tokens = s.split()
+    candidates = [s]
+    if len(tokens) > 1:
+        candidates.append(' '.join(tokens[1:]))  # strip leading service token
+    final_candidates = []
+    for c in candidates:
+        final_candidates.append(c)
+        without_remux = re.sub(r'\s*remux\s*$', '', c).strip()
+        if without_remux != c:
+            final_candidates.append(without_remux)
+    for candidate in final_candidates:
+        if candidate in SOURCE_TYPE_MAP:
+            return SOURCE_TYPE_MAP[candidate]
+    logging.warning(f"Source '{source}' not in SOURCE_TYPE_MAP — source_type won't be sent. "
+                    f"Valid values: {', '.join(sorted(SOURCE_TYPE_MAP.keys()))}")
+    return None
+
+
+_HUNO_TYPE_NAMES = {1: 'DISC', 2: 'REMUX', 3: 'WEB', 15: 'ENCODE'}
+_HUNO_CATEGORY_NAMES = {1: 'Movie', 2: 'TV Show'}
+_HUNO_RESOLUTION_NAMES = {v: k for k, v in RESOLUTION_ID_MAP.items()}
+
+
+def print_huno_payload_preview(data: dict, torrent_name: str, source: str):
+    """Prints a human-readable preview of the HUNO upload payload."""
+    lines = [
+        "",
+        "=" * 62,
+        "  HUNO UPLOAD PAYLOAD PREVIEW",
+        "=" * 62,
+        f"  Torrent name  : {torrent_name}",
+        f"  Source string : {source or '(not set)'}",
+        "-" * 62,
+        f"  category_id   : {data.get('category_id')} ({_HUNO_CATEGORY_NAMES.get(data.get('category_id'), '?')})",
+        f"  type_id       : {data.get('type_id')} ({_HUNO_TYPE_NAMES.get(data.get('type_id'), '?')})",
+        f"  resolution_id : {data.get('resolution_id')} ({_HUNO_RESOLUTION_NAMES.get(data.get('resolution_id'), '?')})",
+        f"  source_type   : {data.get('source_type', '(not sent)')}",
+        f"  tmdb          : {data.get('tmdb')}",
+        f"  imdb          : {data.get('imdb')}",
+        f"  tvdb          : {data.get('tvdb', '(n/a)')}",
+        f"  video_codec   : {data.get('video_codec')}",
+        f"  video_format  : {data.get('video_format')}",
+        f"  audio_format  : {data.get('audio_format')}",
+        f"  audio_channels: {data.get('audio_channels')}",
+        f"  season_pack   : {data.get('season_pack', '(n/a)')}",
+    ]
+    if 'season_number' in data:
+        lines.append(f"  season_number : {data.get('season_number')}")
+    if 'episode_number' in data:
+        lines.append(f"  episode_number: {data.get('episode_number')}")
+    if 'edition' in data:
+        lines.append(f"  edition       : {data.get('edition')}")
+    lines.append("=" * 62)
+    print('\n'.join(lines))
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -115,12 +301,6 @@ def main():
         help="Enable to upload torrent to HUNO, using api key found in settings.ini"
     )
     parser.add_argument(
-        "--aither",
-        action="store_true",
-        default=False,
-        help="Enable to upload torrent to Aither, using api key found in settings.ini"
-    )
-    parser.add_argument(
         "--throttle",
         action="store_true",
         default=False,
@@ -158,6 +338,12 @@ def main():
         help="Enable to skip checking for MediaInfo CLI install"
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Force a full run even if a previous run for this content is detected"
+    )
+    parser.add_argument(
         "-D", "--debug", action="store_true", help="debug mode", default=False
     )
     parser.add_argument(
@@ -181,7 +367,7 @@ def main():
     
     required_settings = ['TMDB_API']
     if arg.huno:
-        required_settings.extend(['HUNO_API', 'HUNO_URL'])
+        required_settings.extend(['HUNO_API', 'HUNO_ANNOUNCE_URL'])
     if arg.inject or arg.throttle:
         required_settings.extend(['QBIT_HOST', 'QBIT_USERNAME', 'QBIT_PASSWORD'])
     if arg.hardlink or (arg.huno and arg.inject):
@@ -191,12 +377,12 @@ def main():
     
     # Assign settings to variables
     huno_api = settings.get('HUNO_API')
+    huno_announce_url = settings.get('HUNO_ANNOUNCE_URL')
     tmdb_api = settings.get('TMDB_API')
     imgbb_api = settings.get('IMGBB_API')
     qbit_username = settings.get('QBIT_USERNAME')
     qbit_password = settings.get('QBIT_PASSWORD')
     qbit_host = settings.get('QBIT_HOST')
-    huno_url = settings.get('HUNO_URL')
     ptpimg_api = settings.get('PTPIMG_API')
     catbox_hash = settings.get('CATBOX_HASH')
     seeding_dir = settings.get('SEEDING_DIR')
@@ -222,6 +408,45 @@ def main():
     runDir = os.path.join("runs", str(next_run_num).zfill(3))
     os.makedirs(runDir)
     logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
+
+    # Write source path so future runs can detect and reuse this run
+    with open(os.path.join(runDir, "source_path.txt"), 'w', encoding='utf-8') as _spf:
+        _spf.write(os.path.normpath(os.path.abspath(path)))
+
+    # --- Check for a previous run of the same content ---
+    prev_run = None
+    reusing = False
+    has_torrent = has_screenshots = has_links = False
+    prev_torrent_filename = None
+
+    if not arg.force:
+        prev_run = find_previous_run(os.path.abspath(path))
+        if prev_run:
+            prev_torrent_files = [f for f in os.listdir(prev_run) if f.endswith('.torrent')]
+            prev_torrent_filename = prev_torrent_files[0] if prev_torrent_files else None
+            has_torrent = prev_torrent_filename is not None
+
+            prev_ss_dir = os.path.join(prev_run, "screenshots")
+            has_screenshots = (os.path.isdir(prev_ss_dir) and
+                               any(f.endswith('.png') for f in os.listdir(prev_ss_dir)))
+
+            prev_desc_path = os.path.join(prev_run, "showDesc.txt")
+            if os.path.exists(prev_desc_path):
+                try:
+                    with open(prev_desc_path, encoding='utf-8') as _df:
+                        has_links = '[img]' in _df.read()
+                except OSError:
+                    pass
+
+            available = [n for n, v in [("torrent file", has_torrent),
+                                         ("screenshots", has_screenshots),
+                                         ("image links", has_links)] if v]
+            if available:
+                msg = (f"Previous run found at {os.path.relpath(prev_run)} "
+                       f"with: {', '.join(available)}. Reuse these? (--force skips this check)")
+                if arg.skipPrompt or getUserInput(msg):
+                    reusing = True
+                    logging.info("Reusing assets from previous run.")
     
     # --- Find the primary video file ---
     videoFile = None
@@ -259,14 +484,56 @@ def main():
         sys.exit(1)
 
     # --- Generate Torrent Name ---
-    group = arg.group or media_file.guessit_info.get('release_group', 'NOGRP')
-    if isinstance(group, list): group = group[0]
-    group = re.sub(r"[\[\]\(\)\{\}]", " ", group).split()[0]
-    
+    is_season_pack = (isFolder == 2 and not arg.episode and not arg.movie)
+
+    if arg.group:
+        group = arg.group
+    else:
+        if isFolder == 2:
+            # For folder inputs, prefer the folder name for group detection (more reliable than episode filename)
+            folder_guessit = guessit.guessit(os.path.basename(path))
+            detected_group = folder_guessit.get('release_group') or media_file.guessit_info.get('release_group')
+        else:
+            detected_group = media_file.guessit_info.get('release_group')
+
+        if detected_group:
+            group = detected_group[0] if isinstance(detected_group, list) else detected_group
+            group = re.sub(r"[\[\]\(\)\{\}]", " ", group).split()[0]
+        else:
+            logging.warning("Could not detect release group from filename.")
+            group_input = input(
+                "Could not detect release group. Enter group name, or press Enter to use 'NOGRP': "
+            ).strip()
+            group = group_input if group_input else 'NOGRP'
+
     source = arg.source or ""
+    if not source:
+        source = detect_source_from_filename(media_file.filename)
+        if not source:
+            source = detect_source_from_filename(os.path.basename(path))
+        if source:
+            logging.info(f"Auto-detected source: '{source}'")
+        else:
+            logging.warning("Could not auto-detect source from filename.")
+            _source_options = (
+                "UHD BluRay, UHD BluRay Hybrid, BluRay, BluRay Hybrid, "
+                "HD-DVD, HD-DVD Hybrid, DVD9, DVD5, DVD, "
+                "WEB-DL, WEB-DL Hybrid, HDTV, SDTV"
+            )
+            source = input(
+                f"Could not detect source. Enter the source type\n"
+                f"  Accepted values: {_source_options}\n> "
+            ).strip()
+            if not source:
+                logging.error("No source provided. Cannot continue.")
+                sys.exit(1)
     if source.lower() == 'blu-ray': source = 'BluRay'
 
-    torrentFileName = media_file.generate_name(source=source, group=group, huno_format=True)
+    try:
+        torrentFileName = media_file.generate_name(source=source, group=group, huno_format=True, is_season_pack=is_season_pack)
+    except RuntimeError as e:
+        logging.error(e)
+        sys.exit(1)
     
     if arg.edition:
         base, ext = os.path.splitext(torrentFileName)
@@ -276,19 +543,39 @@ def main():
         torrentFileName = f"{base} [REPACK]{ext}"
     
     torrentFileName = re.sub(r'[<>:"/\\|?*\x00-\x1F\x7F]', "", torrentFileName)
+    torrentFileName = re.sub(r'\.(mkv|mp4|avi|ts|m2ts)$', '', torrentFileName, flags=re.IGNORECASE)
+    torrentFileName += ".torrent"
     logging.info("Final name: " + torrentFileName)
 
     # --- Create mediainfo dump ---
-    getInfoDump(videoFile, runDir)
-    
-    # --- Screenshot and Upload Logic ---
-    logging.info("Making screenshots...")
-    screenshot_success = create_optimized_screenshots(videoFile, runDir)
-    if not screenshot_success:
-        logging.error("Failed to create screenshots. Continuing without uploads...")
-        arg.upload = False
+    _prev_mi = os.path.join(prev_run, "mediainfo.txt") if prev_run else None
+    if reusing and _prev_mi and os.path.exists(_prev_mi):
+        shutil.copy2(_prev_mi, os.path.join(runDir, "mediainfo.txt"))
+        logging.info("Reusing mediainfo from previous run.")
+    else:
+        getInfoDump(videoFile, runDir)
 
-    if arg.upload and screenshot_success:
+    # --- Screenshot and Upload Logic ---
+    screenshot_success = False
+    if reusing and has_screenshots:
+        shutil.copytree(os.path.join(prev_run, "screenshots"), os.path.join(runDir, "screenshots"))
+        logging.info(f"Reusing screenshots from {os.path.relpath(prev_run)}.")
+        screenshot_success = True
+    else:
+        logging.info("Making screenshots...")
+        screenshot_success = create_optimized_screenshots(videoFile, runDir)
+        if not screenshot_success:
+            logging.error("Failed to create screenshots. Aborting.")
+            sys.exit(1)
+
+    if reusing and has_links:
+        with open(os.path.join(prev_run, "showDesc.txt"), encoding='utf-8') as _df:
+            screenshot_lines = [line for line in _df if '[img]' in line]
+        if screenshot_lines:
+            with open(os.path.join(runDir, "showDesc.txt"), 'w', encoding='utf-8') as _df:
+                _df.writelines(screenshot_lines)
+            logging.info(f"Reused {len(screenshot_lines)} image link(s) from {os.path.relpath(prev_run)}.")
+    elif arg.upload and screenshot_success:
         bbcodes = upload_screenshots_concurrently(
             screenshot_dir=os.path.join(runDir, "screenshots"),
             imgbb_api=imgbb_api,
@@ -302,86 +589,153 @@ def main():
             logging.info(f"Success: BBCode written to showDesc.txt ({len(bbcodes)} images)")
 
     # --- Create Torrent File ---
-    logging.info("Creating torrent file")
-    torrent = torf.Torrent()
-    torrent.private = True
-    torrent.source = "HUNO"
-    torrent.path = path
-    torrent.trackers.append(huno_url)
-
     postName = os.path.splitext(torrentFileName)[0]
-    if (arg.huno and arg.inject) or arg.hardlink:
-        if os.path.dirname(path) != seeding_dir:
-            logging.info("Attempting to create hardlinks for easy seeding...")
-            destination = os.path.join(seeding_dir, postName)
-            copy_folder_structure(path, destination)
-            logging.info(f"Hardlinks created at {destination}")
-            torrent.path = destination
+    if reusing and has_torrent:
+        shutil.copy2(os.path.join(prev_run, prev_torrent_filename), os.path.join(runDir, torrentFileName))
+        logging.info(f"Reusing torrent file from {os.path.relpath(prev_run)}.")
+        if (arg.huno and arg.inject) or arg.hardlink:
+            if seeding_dir and os.path.dirname(path) != seeding_dir:
+                destination = os.path.join(seeding_dir, postName)
+                copy_folder_structure(path, destination)
+                logging.info(f"Hardlinks ensured at {destination}")
+    else:
+        logging.info("Creating torrent file")
+        torrent = torf.Torrent()
+        torrent.private = True
+        torrent.source = "HUNO"
+        torrent.path = path
+        torrent.trackers.append(huno_announce_url)
 
-    logging.info("Generating torrent file hash. This will take a long while...")
-    torrent.generate(callback=cb, interval=0.25)
-    torrent.write(os.path.join(runDir, torrentFileName))
-    logging.info(f"Torrent file wrote to {torrentFileName}")
+        if (arg.huno and arg.inject) or arg.hardlink:
+            if seeding_dir and os.path.dirname(path) != seeding_dir:
+                logging.info("Attempting to create hardlinks for easy seeding...")
+                destination = os.path.join(seeding_dir, postName)
+                copy_folder_structure(path, destination)
+                logging.info(f"Hardlinks created at {destination}")
+                torrent.path = destination
+
+        logging.info("Generating torrent file hash. This will take a long while...")
+        torrent.generate(callback=cb, interval=0.25)
+        torrent.write(os.path.join(runDir, torrentFileName))
+        logging.info(f"Torrent file wrote to {torrentFileName}")
     
-    # --- HUNO Upload Logic (Now using media_file object) ---
+    # --- HUNO Upload Logic ---
     if arg.huno:
         logging.info("Preparing HUNO upload...")
-        
-        videoCodec = media_file.get_video_codec(source)
-        resolution = media_file.get_resolution()
-        
-        type_id = 3 # Default to Encode
-        if videoCodec == "x265": type_id = 15
-        elif "remux" in source.lower(): type_id = 2
 
-        resolution_map = {"4320p": 1, "2160p": 2, "1080p": 3, "1080i": 4, "720p": 5, "576p": 6, "576i": 7, "480p": 8, "480i": 9}
-        resolution_id = resolution_map.get(resolution, 10) # Default to Other
+        try:
+            videoCodec = media_file.get_video_codec(source)
+            resolution = media_file.get_resolution()
+        except RuntimeError as e:
+            logging.error(e)
+            sys.exit(1)
+        type_id = _get_huno_type_id(source, videoCodec)
+        if resolution not in RESOLUTION_ID_MAP:
+            accepted = ", ".join(sorted(RESOLUTION_ID_MAP.keys()))
+            logging.error(
+                f"Resolution '{resolution}' is not supported by HUNO and cannot be uploaded. "
+                f"Accepted HUNO resolutions: {accepted}"
+            )
+            sys.exit(1)
+        resolution_id = RESOLUTION_ID_MAP[resolution]
+
+        source_type_id = _resolve_source_type_id(source)
+
+        audio_info = media_file.get_audio_info()
+        # Split "DDP 5.1" → audio_format="DDP", audio_channels="5.1"
+        audio_parts = audio_info.split(' ', 1)
+        audio_format = audio_parts[0] if audio_parts else ""
+        audio_channels = audio_parts[1] if len(audio_parts) > 1 else ""
+        video_format = media_file.get_colour_space()
 
         IMDB_ID = media_file.metadata.get("imdb_id", "0")
         TVDB_ID = 0
         if not arg.movie:
             try:
-                external_ids_url = f'https://api.themoviedb.org/3/tv/{media_file.tmdb_id}/external_ids?api_key={tmdb_api}'
-                response = requests.get(external_ids_url)
-                response.raise_for_status()
-                external_ids = response.json()
+                ext_url = f'https://api.themoviedb.org/3/tv/{media_file.tmdb_id}/external_ids'
+                ext_resp = requests.get(ext_url, params={'api_key': tmdb_api}, timeout=15)
+                ext_resp.raise_for_status()
+                external_ids = ext_resp.json()
                 IMDB_ID = external_ids.get("imdb_id", "0")
                 TVDB_ID = external_ids.get("tvdb_id", 0)
             except requests.RequestException as e:
                 logging.warning(f"Could not fetch external IDs: {e}")
 
-        media_description = media_file.metadata.get('overview', '')
-        description = generate_bbcode(media_file.tmdb_id, media_description, runDir, tmdb_api, arg.movie, arg.notes)
-        
-        with open(os.path.join(runDir, "mediainfo.txt"), "r", encoding='UTF-8') as infoFile:
-            mediaInfoDump = infoFile.read()
+        generate_bbcode(media_file.tmdb_id, media_file.metadata.get('overview', ''), runDir, tmdb_api, arg.movie, arg.notes)
+
+        is_season_pack = 1 if (not arg.movie and not arg.episode and isFolder == 2) else 0
 
         data = {
-            'season_pack': 0 if (isFolder == 1 or arg.movie or arg.episode) else 1,
-            'stream': 1 if "DD" in media_file.get_audio_info() or "AAC" in media_file.get_audio_info() else 0,
-            'anonymous': 0, 'internal': 0,
+            'anonymous': 0,
+            'internal': 0,
             'category_id': 1 if arg.movie else 2,
             'type_id': type_id,
             'resolution_id': resolution_id,
             'tmdb': int(media_file.tmdb_id),
             'imdb': re.sub(r'\D', '', IMDB_ID or "0"),
             'tvdb': TVDB_ID or 0,
-            'description': description,
-            'mediainfo': mediaInfoDump,
-            'name': postName,
+            'video_codec': videoCodec,
+            'video_format': video_format,
+            'audio_format': audio_format,
+            'audio_channels': audio_channels,
+            'season_pack': is_season_pack,
         }
-        
-        if not arg.movie:
-            data["season"] = int(re.sub(r'\D', '', media_file.guessit_info.get("season", "0")))
-            if arg.episode:
-                data["episode"] = int(re.sub(r'\D', '', media_file.guessit_info.get("episode", "0")))
+        if source_type_id is not None:
+            data['source_type'] = source_type_id
+        if arg.edition:
+            data['edition'] = arg.edition
 
+        if not arg.movie:
+            season_val = media_file.guessit_info.get("season", 0)
+            data["season_number"] = int(re.sub(r'\D', '', str(season_val))) if season_val else 0
+            if arg.episode:
+                episode_val = media_file.guessit_info.get("episode", 0)
+                data["episode_number"] = int(re.sub(r'\D', '', str(episode_val))) if episode_val else 0
+
+        print_huno_payload_preview(data, torrentFileName, source)
         if arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
-            url = f"https://hawke.uno/api/torrents/upload?api_token={huno_api}"
-            torrent_payload = {'torrent': open(os.path.join(runDir, torrentFileName), 'rb')}
-            response = requests.post(url=url, data=data, files=torrent_payload)
-            logging.info(f"HUNO Upload Status: {response.status_code}")
-            logging.info(f"HUNO Response: {response.json()}")
+            desc_path = os.path.join(runDir, "showDesc.txt")
+            mediainfo_path = os.path.join(runDir, "mediainfo.txt")
+            torrent_path = os.path.join(runDir, torrentFileName)
+            headers = {"Authorization": f"Bearer {huno_api}", "Accept": "application/json"}
+            try:
+                with open(desc_path, 'rb') as desc_f, \
+                     open(mediainfo_path, 'rb') as mi_f, \
+                     open(torrent_path, 'rb') as torrent_f:
+                    files = {
+                        'torrent': (torrentFileName, torrent_f, 'application/x-bittorrent'),
+                        'description': ('description.txt', desc_f, 'text/plain'),
+                        'mediainfo': ('mediainfo.txt', mi_f, 'text/plain'),
+                    }
+                    response = requests.post(
+                        url=HUNO_API_URL,
+                        headers=headers,
+                        data=data,
+                        files=files,
+                        timeout=60,
+                    )
+                if response.status_code == 409:
+                    result = response.json()
+                    logging.warning(f"HUNO upload rejected — duplicate content: {result.get('message')}")
+                    logging.warning(f"Details: {result.get('data')}")
+                elif response.status_code == 422:
+                    result = response.json()
+                    logging.error(f"HUNO upload rejected — attribute mismatch: {result.get('message')}")
+                    logging.error(f"Details: {result.get('data')}")
+                else:
+                    response.raise_for_status()
+                    result = response.json()
+                    if result.get("success"):
+                        logging.info(f"HUNO upload successful: {result.get('message')}")
+                        if result.get("data", {}).get("warnings"):
+                            logging.warning(f"HUNO warnings: {result['data']['warnings']}")
+                    else:
+                        logging.error(f"HUNO upload failed: {result.get('message')}")
+                        logging.error(f"Details: {result.get('data')}")
+            except requests.exceptions.HTTPError as e:
+                logging.error(f"HUNO HTTP error {e.response.status_code}: {e.response.text[:500]}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"HUNO upload request failed: {e}")
 
     # --- qBitTorrent Injection ---
     if arg.inject:
@@ -413,7 +767,7 @@ def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, isMovie, notes=None):
 def get_prominent_color(tmdb_id, api_key, directory, isMovie):
     logging.info(f"Fetching poster for TMDB ID: {tmdb_id}")
     api_path = 'movie' if isMovie else 'tv'
-    response = requests.get(f'https://api.themoviedb.org/3/{api_path}/{tmdb_id}?api_key={api_key}')
+    response = requests.get(f'https://api.themoviedb.org/3/{api_path}/{tmdb_id}', params={'api_key': api_key})
     data = response.json()
     poster_path = data.get('poster_path')
     if not poster_path:
@@ -454,7 +808,7 @@ def create_optimized_screenshots(videoFile, runDir):
         if success:
             temp_png = os.path.join(screenshots_dir, f"temp_{i:02d}.png")
             cv2.imwrite(temp_png, image)
-            final_path = os.path.join(screenshots_dir, f"screenshot_{i:02d}.jpg")
+            final_path = os.path.join(screenshots_dir, f"screenshot_{i:02d}.png")
             optimize_screenshot(temp_png, final_path)
             os.remove(temp_png)
             successful_screenshots += 1
@@ -463,8 +817,15 @@ def create_optimized_screenshots(videoFile, runDir):
             logging.warning(f"Failed to create screenshot at timestamp {timestamp:.2f}s")
             
     video.release()
+    expected = len(timestamps)
+    if successful_screenshots < expected:
+        logging.error(
+            f"Only {successful_screenshots} of {expected} screenshots were created successfully. "
+            f"All {expected} are required."
+        )
+        return False
     logging.info(f"Created {successful_screenshots} optimized screenshots")
-    return successful_screenshots > 0
+    return True
 
 def optimize_screenshot(input_path, output_path, max_width=1920, quality=85):
     try:
@@ -474,7 +835,7 @@ def optimize_screenshot(input_path, output_path, max_width=1920, quality=85):
                 ratio = max_width / img.width
                 new_height = int(img.height * ratio)
                 img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
-            img.save(output_path, 'JPEG', quality=quality, optimize=True)
+            img.save(output_path, 'PNG', quality=quality, optimize=True)
     except Exception as e:
         logging.error(f"Failed to optimize screenshot {input_path}: {e}")
         shutil.copy(input_path, output_path)
@@ -507,7 +868,7 @@ def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash):
     return None
 
 def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbox_hash, max_workers=5):
-    images = sorted([f for f in os.listdir(screenshot_dir) if f.lower().endswith('.jpg')])
+    images = sorted([f for f in os.listdir(screenshot_dir) if f.lower().endswith('.png')])
     if not images:
         logging.warning("No screenshots found to upload!")
         return []

@@ -12,3 +12,5 @@ babel
 mutagen
 musicbrainzngs
 tqdm
+pytest
+pytest-mock

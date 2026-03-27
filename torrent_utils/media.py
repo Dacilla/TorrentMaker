@@ -4,6 +4,7 @@ import json
 import requests
 import os
 import re
+import sys
 from pymediainfo import MediaInfo
 from datetime import datetime
 from babel import Locale
@@ -46,45 +47,63 @@ class MediaFile:
         
     def get_resolution(self) -> str:
         """Determines the video resolution with more detailed logic."""
-        if not self.video_track: return "Unknown"
-        
+        if hasattr(self, '_resolution_cache'):
+            return self._resolution_cache
+
+        if not self.video_track:
+            raise RuntimeError("No video track found in media file. Cannot determine resolution.")
+
         width = self.video_track.get('Width')
         height = self.video_track.get('Height')
         frame_rate = self.video_track.get('FrameRate')
 
-        if not width or not height: return "Unknown"
+        if not width or not height:
+            raise RuntimeError("Video track found but width/height dimensions are missing. Cannot determine resolution.")
 
         width_to_height_dict = {"720": "576", "960": "540", "1280": "720", "1920": "1080", "4096": "2160", "3840": "2160", "692": "480", "1024": "576"}
         acceptedHeights = ['576', '480', '360', '240', '720', '1080', '1440', '2160']
-        
+
         width_str = str(width)
         height_str = str(height)
+        is_interlaced = self.video_track.get('ScanType') == 'Interlaced'
+        result = None
 
         if width_str in width_to_height_dict:
             height_str = width_to_height_dict[width_str]
             if height_str == "576" and frame_rate and "29" in str(frame_rate):
                 logging.info("NTSC detected. Changed resolution to 480p")
                 height_str = "480"
-            return f"{height_str}p"
+            suffix = "i" if is_interlaced else "p"
+            result = f"{height_str}{suffix}"
+        elif height_str in acceptedHeights:
+            suffix = "i" if is_interlaced else "p"
+            result = f"{height_str}{suffix}"
+        else:
+            logging.warning(f"Could not determine a standard resolution for detected dimensions {width}x{height}.")
+            res_input = input(
+                f"Detected dimensions {width}x{height} do not match a known resolution. "
+                "Enter the resolution to use (e.g. 2160p, 1080p, 1080i, 720p, 576p, 480p): "
+            ).strip()
+            if not res_input:
+                logging.error("No resolution provided. Cannot continue.")
+                sys.exit(1)
+            result = res_input
 
-        if height_str in acceptedHeights:
-            resolution = f"{height_str}p"
-            if "Interlaced" in str(self.media_info):
-                resolution = resolution.replace("p", "i")
-            return resolution
-
-        logging.warning(f"Could not determine standard resolution for {width}x{height}. Using height.")
-        return f"{height_str}p"
+        self._resolution_cache = result
+        return result
 
 
     def get_video_codec(self, source: str) -> str:
         """Determines the video codec based on MediaInfo, filename and source."""
-        if not self.video_track: return "H264" # Default
+        if not self.video_track:
+            raise RuntimeError("No video track found in media file. Cannot determine video codec.")
         
         video_format = self.video_track.get('Format', '')
         file_lower = self.filename.lower()
         source_lower = source.lower() if source else ""
 
+        if 'AV1' in video_format:
+            return 'AV1'
         if 'HEVC' in video_format:
             if 'remux' in source_lower: return 'HEVC'
             if 'h265' in file_lower or 'hevc' in file_lower: return 'H265'
@@ -92,15 +111,20 @@ class MediaFile:
         if "VC-1" in video_format: return "VC-1"
         if "V_MPEG2" in self.video_track.get('CodecID', ''): return "MPEG-2"
         if 'remux' in source_lower: return "AVC"
-        if 'x264' in file_lower: return "x264"
+        encoding_settings = self.video_track.get('Encoding_settings', '')
+        if 'x264' in file_lower or 'x264' in encoding_settings.lower(): return "x264"
         return "H264"
 
     def get_audio_info(self) -> str:
         """Determines the audio format and channels from the primary audio track."""
+        if hasattr(self, '_audio_info_cache'):
+            return self._audio_info_cache
+
         audio_track = self.audio_track
         if not audio_track:
-            logging.warning("No audio track found!")
-            return ""
+            logging.warning("No audio track found. Setting audio to NONE 0.0.")
+            self._audio_info_cache = "NONE 0.0"
+            return self._audio_info_cache
 
         # Codec mapping
         codecsDict = {
@@ -108,7 +132,7 @@ class MediaFile:
             "AAC": "AAC", "PCM": "PCM", "AC-3": "DD",
             "FLAC": "FLAC", "Opus": "OPUS"
         }
-        
+
         audio_format = None
 
         # Check for commercial format names first
@@ -121,7 +145,7 @@ class MediaFile:
             elif "DTS-HD High Resolution Audio" in commercialFormat: audio_format = "DTS-HD HR"
             elif "DTS-ES" in commercialFormat: audio_format = "DTS-ES"
             elif "DTS" in commercialFormat: audio_format = "DTS"
-            
+
             if audio_format and 'Atmos' in commercialFormat:
                 audio_format += " Atmos"
 
@@ -138,15 +162,21 @@ class MediaFile:
                 audio_format = "Vorbis"
 
         if audio_format is None:
-            logging.error("Could not determine audio format.")
-            audio_format = "Audio"
+            logging.error(f"Could not determine audio format (raw format reported by MediaInfo: '{audio_track.get('Format')}').")
+            audio_format = input(
+                "Could not detect audio format. Enter the audio format to use "
+                "(e.g. DDP, DD, TrueHD, DTS-HD MA, DTS, AAC, FLAC, PCM, MP3, OPUS): "
+            ).strip()
+            if not audio_format:
+                logging.error("No audio format provided. Cannot continue.")
+                sys.exit(1)
 
         # Determine channels
         channels_num_str = audio_track.get('Channels', '0')
         try:
             channels_num = int(channels_num_str)
             channel_layout = audio_track.get('ChannelLayout', '')
-            
+
             if "LFE" in channel_layout:
                 main_channels = channels_num - 1
                 channel_str = f"{main_channels}.1"
@@ -154,8 +184,9 @@ class MediaFile:
                 channel_str = f"{channels_num}.0"
         except (ValueError, TypeError):
             channel_str = f"{channels_num_str}.0"
-            
-        return f"{audio_format} {channel_str}"
+
+        self._audio_info_cache = f"{audio_format} {channel_str}"
+        return self._audio_info_cache
 
     def get_colour_space(self) -> str:
         """Determines the color space (SDR, HDR, etc.)."""
@@ -174,13 +205,14 @@ class MediaFile:
     def get_language_name(self) -> str:
         """Gets the display name of the audio language."""
         if not self.audio_track or 'Language' not in self.audio_track:
-            return input("No language found. Please input language:\n")
-        
+            raise ValueError("No language tag found in primary audio track.")
+        if self.audio_track['Language'].lower() == 'zxx':
+            return 'NONE'
         try:
             locale = Locale(self.audio_track['Language'])
             return locale.get_display_name('en')
         except Exception:
-            return 'Unknown'
+            raise ValueError(f"Unrecognised language code: {self.audio_track.get('Language')}")
 
 
 class Movie(MediaFile):
@@ -203,9 +235,9 @@ class Movie(MediaFile):
             logging.error("Could not determine TMDB ID for movie.")
             return {}
 
-        url = f'https://api.themoviedb.org/3/movie/{self.tmdb_id}?api_key={self.tmdb_api_key}'
+        url = f'https://api.themoviedb.org/3/movie/{self.tmdb_id}'
         try:
-            response = requests.get(url, timeout=15)
+            response = requests.get(url, params={'api_key': self.tmdb_api_key}, timeout=15)
             response.raise_for_status()  # Will raise an exception for 4xx/5xx errors
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -217,7 +249,7 @@ class Movie(MediaFile):
         if not self.metadata: return ""
 
         title = self.metadata.get('title', 'Unknown Movie').replace(':', '')
-        year = self.metadata.get('release_date', '0000')[:4]
+        year = (self.metadata.get('release_date') or '0000')[:4]
         resolution = self.get_resolution()
         video_codec = self.get_video_codec(source)
         audio = self.get_audio_info()
@@ -225,7 +257,14 @@ class Movie(MediaFile):
 
         if huno_format:
             colour_space = self.get_colour_space()
-            language = self.get_language_name()
+            try:
+                language = self.get_language_name()
+            except ValueError as e:
+                logging.warning(f"Language detection failed: {e}")
+                language = input("Could not detect audio language. Enter the full English language name (e.g. 'English', 'Japanese'): ").strip()
+                if not language:
+                    logging.error("No language provided. Cannot continue.")
+                    sys.exit(1)
             base_name = f"{title} ({year})"
             details = f"{resolution} {source} {video_codec} {colour_space} {audio} {language} - {group}"
             filename = f"{base_name} ({details}).{container}"
@@ -235,7 +274,7 @@ class Movie(MediaFile):
             parts = [title, year, resolution, source, audio.replace(' ', ''), video_codec]
             filename = '.'.join(filter(None, parts)) + f"-{group}.{container}"
             filename = filename.replace(' ', '.')
-        
+
         return re.sub(r'[\'é]', '', filename).replace('..', '.').replace('--', '-')
 
 
@@ -259,37 +298,76 @@ class TVShow(MediaFile):
             logging.error("Could not determine TMDB ID for TV show.")
             return {}
             
-        url = f'https://api.themoviedb.org/3/tv/{self.tmdb_id}?api_key={self.tmdb_api_key}'
+        url = f'https://api.themoviedb.org/3/tv/{self.tmdb_id}'
         try:
-            response = requests.get(url, timeout=15)
+            response = requests.get(url, params={'api_key': self.tmdb_api_key}, timeout=15)
             response.raise_for_status() # Will raise an exception for 4xx/5xx errors
             return response.json()
         except requests.RequestException as e:
             logging.error(f"Failed to fetch TMDB data for TV show ID {self.tmdb_id}: {e}")
             return {}
 
-    def generate_name(self, source: str, group: str, huno_format: bool) -> str:
-        """Generates a standardized filename for the TV episode."""
+    def generate_name(self, source: str, group: str, huno_format: bool, is_season_pack: bool = False) -> str:
+        """Generates a standardized filename for the TV episode or season pack."""
         if not self.metadata: return ""
 
         show_name = self.metadata.get('name', 'Unknown Show').replace(':', '')
-        year = self.metadata.get('first_air_date', '0000')[:4]
+        year = (self.metadata.get('first_air_date') or '0000')[:4]
         resolution = self.get_resolution()
         video_codec = self.get_video_codec(source)
         audio = self.get_audio_info()
         container = self.guessit_info.get('container', 'mkv')
-        
-        season = get_season(self.filename)
-        episode = "E" + get_episode(self.filename)
-        episode_title = self.guessit_info.get('episode_title')
-        episode_num = f"{season}{episode}"
-        if episode_title:
-            episode_num += f" - {episode_title}"
+
+        try:
+            season = get_season(self.filename)
+        except ValueError:
+            season_guess = self.guessit_info.get('season', '')
+            if season_guess:
+                season = f"S{str(season_guess).zfill(2)}"
+            else:
+                logging.warning(f"Could not determine season number from: {self.filename}")
+                season_input = input(
+                    "Could not detect season number. Enter season in SXX format (e.g. S01, S02): "
+                ).strip().upper()
+                if not re.match(r'^S\d{2,}$', season_input):
+                    logging.error(f"Invalid season format '{season_input}'. Expected format like S01.")
+                    sys.exit(1)
+                season = season_input
+
+        if is_season_pack:
+            episode_num = season
+        else:
+            try:
+                episode = "E" + get_episode(self.filename)
+            except ValueError:
+                ep = self.guessit_info.get('episode', '')
+                if ep:
+                    episode = f"E{str(ep).zfill(2)}"
+                else:
+                    logging.warning(f"Could not determine episode number from: {self.filename}")
+                    episode_input = input(
+                        "Could not detect episode number. Enter episode in EXX format (e.g. E01, E02): "
+                    ).strip().upper()
+                    if not re.match(r'^E\d{2,}$', episode_input):
+                        logging.error(f"Invalid episode format '{episode_input}'. Expected format like E01.")
+                        sys.exit(1)
+                    episode = episode_input
+            episode_title = self.guessit_info.get('episode_title')
+            episode_num = f"{season}{episode}"
+            if episode_title:
+                episode_num += f" - {episode_title}"
 
         if huno_format:
             colour_space = self.get_colour_space()
-            language = self.get_language_name()
-            base_name = f"{show_name} ({year}) - {episode_num}"
+            try:
+                language = self.get_language_name()
+            except ValueError as e:
+                logging.warning(f"Language detection failed: {e}")
+                language = input("Could not detect audio language. Enter the full English language name (e.g. 'English', 'Japanese'): ").strip()
+                if not language:
+                    logging.error("No language provided. Cannot continue.")
+                    sys.exit(1)
+            base_name = f"{show_name} ({year}) {episode_num}"
             details = f"{resolution} {source} {video_codec} {colour_space} {audio} {language} - {group}"
             filename = f"{base_name} ({details}).{container}"
         else:

@@ -87,31 +87,37 @@ def download_mediainfo():
         if os.path.exists(zip_path):
             os.remove(zip_path)
 
+def _install_with_winget(package_id: str, binary_name: str) -> bool:
+    """Attempts to install a package using winget on Windows. Returns True on success."""
+    if platform.system() != "Windows" or not shutil.which("winget"):
+        return False
+    try:
+        logging.info(f"Running: winget install {package_id} -e --accept-source-agreements --accept-package-agreements")
+        subprocess.run(
+            ["winget", "install", package_id, "-e", "--accept-source-agreements", "--accept-package-agreements"],
+            check=True,
+        )
+        if shutil.which(binary_name):
+            logging.info(f"{package_id} installed successfully via winget.")
+            return True
+        logging.error(f"Winget install appeared to succeed but '{binary_name}' is still not in PATH. You may need to restart your terminal.")
+        return False
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logging.error(f"Winget installation failed: {e}")
+        return False
+
+
 def install_mediainfo_with_package_manager():
     """Attempts to install MediaInfo using a detected package manager."""
-    system = platform.system()
-    if system == "Windows":
-        if shutil.which("winget"):
-            prompt = (
-                "MediaInfo is required to read technical data from media files for accurate torrent naming. "
-                "It was not found on your system. Attempt to install it now using winget? (This may require administrator privileges)"
-            )
-            if getUserInput(prompt):
-                try:
-                    logging.info("Running: winget install MediaInfo.MediaInfo -e --accept-source-agreements --accept-package-agreements")
-                    subprocess.run(["winget", "install", "MediaInfo.MediaInfo", "-e", "--accept-source-agreements", "--accept-package-agreements"], check=True, shell=True)
-                    if shutil.which("mediainfo"):
-                        logging.info("MediaInfo installed successfully via winget.")
-                        return True
-                    else:
-                        logging.error("Winget installation appeared to succeed, but 'mediainfo' is still not in the PATH. You may need to restart your terminal.")
-                        return False
-                except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                    logging.error(f"Winget installation failed: {e}")
-                    return False
-        else:
-            logging.info("Windows Package Manager (winget) not found.")
-            return False
+    if platform.system() == "Windows" and shutil.which("winget"):
+        prompt = (
+            "MediaInfo is required to read technical data from media files for accurate torrent naming. "
+            "It was not found on your system. Attempt to install it now using winget? (This may require administrator privileges)"
+        )
+        if getUserInput(prompt):
+            return _install_with_winget("MediaInfo.MediaInfo", "mediainfo")
+        return False
+    logging.info("Windows Package Manager (winget) not found.")
     return False
 
 def ensure_mediainfo_cli():
@@ -223,18 +229,8 @@ def install_flac_with_package_manager():
             "Attempt to install it now using winget? (This may require administrator privileges)"
         )
         if getUserInput(prompt):
-            try:
-                logging.info("Running: winget install Xiph.Flac -e --accept-source-agreements --accept-package-agreements")
-                subprocess.run(["winget", "install", "Xiph.Flac", "-e", "--accept-source-agreements", "--accept-package-agreements"], check=True, shell=True)
-                if shutil.which("flac"):
-                    logging.info("FLAC installed successfully via winget.")
-                    return True
-                else:
-                    logging.error("Winget installation appeared to succeed, but 'flac' is still not in the PATH. You may need to restart your terminal.")
-                    return False
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                logging.error(f"Winget installation failed: {e}")
-                return False
+            return _install_with_winget("Xiph.Flac", "flac")
+        return False
     return False
 
 def ensure_flac_cli():
@@ -275,13 +271,10 @@ def get_tmdb_id(name, api_key, isMovie):
     # The base URL for the TMDB API
     logging.info("Looking for title: " + name)
 
-    if isMovie:
-        url = f'https://api.themoviedb.org/3/search/movie?query={name}&api_key={api_key}'
-    else:
-        url = f'https://api.themoviedb.org/3/search/tv?query={name}&api_key={api_key}'
-
+    endpoint = 'movie' if isMovie else 'tv'
+    url = f'https://api.themoviedb.org/3/search/{endpoint}'
     try:
-        response = requests.get(url, timeout=15)
+        response = requests.get(url, params={'query': name, 'api_key': api_key}, timeout=15)
         response.raise_for_status()
         results = response.json().get("results", [])
         
@@ -356,23 +349,20 @@ def getUserInput(question: str):
             return False
         logging.warning("Given input is not valid. Must be one of [y,n]\n")
 
-def get_season(filename: str):
-    # Use a regex to match the season string
-    match = re.search(r'S\d\d', filename.upper())
+def get_season(filename: str) -> str:
+    """Returns the season string (e.g. 'S03') from a filename, or raises ValueError."""
+    match = re.search(r'S(\d{1,3})', filename.upper())
     if match:
-        # If a match is found, return the season string
-        return match.group(0)
-    else:
-        # If no match is found, return an empty string
-        return input('Season number was not found. Please input in the format S00\n')
+        return f"S{match.group(1).zfill(2)}"
+    raise ValueError(f"Season number not found in filename: {filename}")
 
 
-def get_episode(filename: str):
-    import re
-    match = re.search(r'S\d{2}E\d{2}', filename.upper())
+def get_episode(filename: str) -> str:
+    """Returns the zero-padded episode number string (e.g. '05') from a filename, or raises ValueError."""
+    match = re.search(r'S\d{1,3}E(\d{1,3})', filename.upper())
     if match:
-        return match.group().split('E')[1]
-    return input("Episode number can't be found. Please enter episode number in format 'E00'\n")
+        return match.group(1).zfill(2)
+    raise ValueError(f"Episode number not found in filename: {filename}")
 
 def similarity(s1, s2):
     distance = Levenshtein.distance(s1, s2)
@@ -402,7 +392,7 @@ def uploadToPTPIMG(imageFile: str, api_key: str):
             url="https://ptpimg.me/upload.php",
             data={"api_key": api_key},
             files=file_payload,
-            timeout=20
+            timeout=30,
         )
         response.raise_for_status()
         
@@ -445,7 +435,8 @@ def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torren
     try:
         result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category=category, tags="Self-Upload", rename=postName, seeding_time_limit=seedTimeLimit)
     except Exception as e:
-        print(e)
+        logging.error(f"qBittorrent injection failed: {e}")
+        return
     if result == "Ok.":
         logging.info("Torrent successfully injected.")
     else:
