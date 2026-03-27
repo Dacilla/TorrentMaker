@@ -53,6 +53,21 @@ class MediaFile:
         if self.media_info and 'track' in self.media_info.get('media', {}):
             return next((t for t in self.media_info['media']['track'] if t.get('@type') == 'Audio'), {})
         return {}
+
+    @property
+    def audio_tracks(self) -> list:
+        if self.media_info and 'track' in self.media_info.get('media', {}):
+            return [t for t in self.media_info['media']['track'] if t.get('@type') == 'Audio']
+        return []
+
+    def _get_primary_audio_tracks(self) -> list:
+        """Returns audio tracks excluding commentary and other secondary tracks."""
+        _secondary_keywords = ('commentary', 'director', 'audio description', 'descriptive',
+                               'hearing impaired', 'sdh', 'ad ')
+        return [
+            t for t in self.audio_tracks
+            if not any(kw in t.get('Title', '').lower() for kw in _secondary_keywords)
+        ]
         
     def get_resolution(self) -> str:
         """Determines the video resolution with more detailed logic."""
@@ -212,16 +227,31 @@ class MediaFile:
         return "HDR"
 
     def get_language_name(self) -> str:
-        """Gets the display name of the audio language."""
-        if not self.audio_track or 'Language' not in self.audio_track:
+        """Gets the audio language label: MULTI (3+ primary tracks), DUAL (2 primary tracks),
+        or the language display name (1 primary track)."""
+        primary_tracks = self._get_primary_audio_tracks()
+
+        if not primary_tracks:
+            raise ValueError("No primary audio tracks found.")
+
+        if len(primary_tracks) >= 3:
+            return 'MULTI'
+
+        if len(primary_tracks) == 2:
+            return 'DUAL'
+
+        # Single primary track
+        track = primary_tracks[0]
+        lang_code = track.get('Language', '')
+        if not lang_code:
             raise ValueError("No language tag found in primary audio track.")
-        if self.audio_track['Language'].lower() == 'zxx':
+        if lang_code.lower() == 'zxx':
             return 'NONE'
         try:
-            locale = Locale(self.audio_track['Language'])
+            locale = Locale(lang_code)
             return locale.get_display_name('en')
         except Exception:
-            raise ValueError(f"Unrecognised language code: {self.audio_track.get('Language')}")
+            raise ValueError(f"Unrecognised language code: {lang_code}")
 
 
 class Movie(MediaFile):

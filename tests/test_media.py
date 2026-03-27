@@ -6,8 +6,11 @@ from unittest.mock import patch, MagicMock
 # Helpers to build a minimal pymediainfo-style JSON structure
 # ---------------------------------------------------------------------------
 
-def _make_media_info(video: dict = None, audio: dict = None):
-    """Return a fake media_info dict matching the pymediainfo JSON schema."""
+def _make_media_info(video: dict = None, audio: dict = None, audio_tracks: list = None):
+    """Return a fake media_info dict matching the pymediainfo JSON schema.
+
+    Pass *audio* for a single audio track, or *audio_tracks* for multiple.
+    """
     tracks = [{"@type": "General"}]
     if video:
         t = {"@type": "Video"}
@@ -16,6 +19,10 @@ def _make_media_info(video: dict = None, audio: dict = None):
     if audio:
         t = {"@type": "Audio"}
         t.update(audio)
+        tracks.append(t)
+    for extra in (audio_tracks or []):
+        t = {"@type": "Audio"}
+        t.update(extra)
         tracks.append(t)
     return {"media": {"track": tracks}}
 
@@ -261,6 +268,37 @@ class TestGetLanguageName:
         f = _make_media_file(media_info=_make_media_info(audio=audio))
         with pytest.raises(ValueError):
             f.get_language_name()
+
+    def test_two_primary_tracks_returns_dual(self):
+        f = _make_media_file(media_info=_make_media_info(audio_tracks=[
+            {"Language": "ja"},
+            {"Language": "en"},
+        ]))
+        assert f.get_language_name() == "DUAL"
+
+    def test_three_primary_tracks_returns_multi(self):
+        f = _make_media_file(media_info=_make_media_info(audio_tracks=[
+            {"Language": "ja"},
+            {"Language": "en"},
+            {"Language": "fr"},
+        ]))
+        assert f.get_language_name() == "MULTI"
+
+    def test_commentary_tracks_excluded_from_count(self):
+        # One real track + one commentary → still single language
+        f = _make_media_file(media_info=_make_media_info(audio_tracks=[
+            {"Language": "en"},
+            {"Language": "en", "Title": "Director's Commentary"},
+        ]))
+        assert f.get_language_name() == "English"
+
+    def test_commentary_excluded_leaving_two_primary(self):
+        f = _make_media_file(media_info=_make_media_info(audio_tracks=[
+            {"Language": "ja"},
+            {"Language": "en"},
+            {"Language": "en", "Title": "Commentary"},
+        ]))
+        assert f.get_language_name() == "DUAL"
 
 
 # ---------------------------------------------------------------------------
