@@ -12,6 +12,29 @@ from babel import Locale
 # These are still needed for now, but more logic will be moved from them.
 from .helpers import get_tmdb_id, get_season, get_episode
 
+
+def _prompt_tmdb_candidates(candidates: list, media_type: str) -> int | None:
+    """Show top TMDB candidates and ask the user to pick one or enter an ID manually."""
+    if not candidates:
+        print(f"\nNo TMDB candidates found for this {media_type}.")
+    else:
+        print(f"\nCould not automatically identify this {media_type} on TMDB. Top matches:")
+        for i, c in enumerate(candidates, 1):
+            year_str = f" ({c['year']})" if c['year'] else ""
+            print(f"  {i}. {c['name']}{year_str}  [ID: {c['id']}]")
+
+    print(f"  Enter a number to use a match, enter a TMDB ID directly, or press Enter to skip.")
+    choice = input("> ").strip()
+
+    if not choice:
+        return None
+    if choice.isdigit() and candidates and 1 <= int(choice) <= len(candidates):
+        return candidates[int(choice) - 1]['id']
+    if choice.isdigit():
+        return int(choice)
+    return None
+
+
 class MediaFile:
     """A base class representing a generic media file."""
 
@@ -272,8 +295,11 @@ class Movie(MediaFile):
         if not self.tmdb_id:
             logging.info("Attempting to find TMDB ID for movie...")
             title_to_search = self.guessit_info.get('title', '')
-            self.tmdb_id = get_tmdb_id(title_to_search, self.tmdb_api_key, isMovie=True)
-        
+            self.tmdb_id, candidates = get_tmdb_id(title_to_search, self.tmdb_api_key, isMovie=True)
+
+        if not self.tmdb_id:
+            self.tmdb_id = _prompt_tmdb_candidates(candidates, 'movie')
+
         if not self.tmdb_id:
             logging.error("Could not determine TMDB ID for movie.")
             return {}
@@ -336,7 +362,10 @@ class TVShow(MediaFile):
         if not self.tmdb_id:
             logging.info("Attempting to find TMDB ID for TV show...")
             title_to_search = self.guessit_info.get('title', '')
-            self.tmdb_id = get_tmdb_id(title_to_search, self.tmdb_api_key, isMovie=False)
+            self.tmdb_id, candidates = get_tmdb_id(title_to_search, self.tmdb_api_key, isMovie=False)
+
+        if not self.tmdb_id:
+            self.tmdb_id = _prompt_tmdb_candidates(candidates, 'TV show')
 
         if not self.tmdb_id:
             logging.error("Could not determine TMDB ID for TV show.")

@@ -266,9 +266,9 @@ def ensure_flac_cli():
 
 def get_tmdb_id(name, api_key, isMovie):
     """
-    Returns the TMDB ID of a TV show or movie given its name.
+    Returns (tmdb_id, candidates) where tmdb_id is the confident match (or None)
+    and candidates is a list of dicts with keys: id, name, year, similarity.
     """
-    # The base URL for the TMDB API
     logging.info("Looking for title: " + name)
 
     endpoint = 'movie' if isMovie else 'tv'
@@ -277,32 +277,45 @@ def get_tmdb_id(name, api_key, isMovie):
         response = requests.get(url, params={'query': name, 'api_key': api_key}, timeout=15)
         response.raise_for_status()
         results = response.json().get("results", [])
-        
-        if not results:
-            return None
 
-        for result in results:
+        if not results:
+            return None, []
+
+        candidates = []
+        for result in results[:10]:
             try:
                 if isMovie:
                     title = result.get('title', '')
                     original_title = result.get('original_title', '')
                     logging.info(f"Comparing {name} to {original_title}, ID {result.get('id')}")
                     titleSimilarity = max(similarity(name, original_title), similarity(name, title))
+                    display_name = title or original_title
+                    year = (result.get('release_date') or '')[:4]
                 else:
                     show_name = result.get('name', '')
                     original_name = result.get('original_name', '')
                     logging.info(f"Comparing {name} to {show_name}, aka {original_name}, ID {result.get('id')}")
                     titleSimilarity = max(similarity(name, original_name), similarity(name, show_name))
-                
+                    display_name = show_name or original_name
+                    year = (result.get('first_air_date') or '')[:4]
+
                 logging.info("Similarity: " + str(titleSimilarity))
+                candidates.append({
+                    'id': result.get('id'),
+                    'name': display_name,
+                    'year': year,
+                    'similarity': titleSimilarity,
+                })
                 if titleSimilarity > 85:
-                    return result.get("id")
+                    return result.get('id'), candidates
             except (KeyError, TypeError):
                 continue
-        return None
+
+        candidates.sort(key=lambda c: c['similarity'], reverse=True)
+        return None, candidates[:5]
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to search TMDB for '{name}': {e}")
-        return None
+        return None, []
 
 
 def getInfoDump(filePath: str, runDir: str):

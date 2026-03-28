@@ -234,6 +234,7 @@ def print_huno_payload_preview(data: dict, torrent_name: str, source: str):
         f"  tmdb          : {data.get('tmdb')}",
         f"  imdb          : {data.get('imdb')}",
         f"  tvdb          : {data.get('tvdb', '(n/a)')}",
+        f"  mal           : {data.get('mal', '(n/a)')}",
     ]
     # codec/format field names differ between auto and manual mode
     if 'video_codec_id' in data:
@@ -274,6 +275,54 @@ def print_huno_payload_preview(data: dict, torrent_name: str, source: str):
 
 
 HUNO_FILTER_URL = "https://hawke.uno/api/torrents/filter"
+JIKAN_API_URL = "https://api.jikan.moe/v4"
+
+
+def is_anime(metadata: dict, is_movie: bool) -> bool:
+    """Detects whether TMDB metadata represents an anime title.
+    Anime is defined as Animation (genre 16) with Japanese origin/language.
+    """
+    genres = metadata.get('genres', [])
+    genre_ids = {g.get('id') for g in genres}
+    if 16 not in genre_ids:
+        return False
+    if is_movie:
+        if metadata.get('original_language') == 'ja':
+            return True
+        countries = [c.get('iso_3166_1') for c in metadata.get('production_countries', [])]
+        return 'JP' in countries
+    else:
+        origin_countries = metadata.get('origin_country', [])
+        return 'JP' in origin_countries or metadata.get('original_language') == 'ja'
+
+
+def lookup_mal_id(title: str, is_movie: bool) -> int | None:
+    """Searches the Jikan (MAL) API for the best-matching anime title.
+    Returns the MAL ID (int) or None if not found / request fails.
+    """
+    media_type = 'movie' if is_movie else 'tv'
+    params = {'q': title, 'type': media_type, 'limit': 10}
+    try:
+        resp = requests.get(f"{JIKAN_API_URL}/anime", params=params, timeout=15)
+        resp.raise_for_status()
+        results = resp.json().get('data', [])
+        if not results:
+            return None
+        # Pick the result with the lowest Levenshtein distance to the title
+        title_lower = title.lower()
+        best_id = None
+        best_dist = float('inf')
+        for entry in results:
+            candidate = entry.get('title', '')
+            dist = Levenshtein.distance(title_lower, candidate.lower())
+            if dist < best_dist:
+                best_dist = dist
+                best_id = entry.get('mal_id')
+        logging.info(f"Jikan MAL lookup: best match distance={best_dist}, mal_id={best_id}")
+        return best_id
+    except requests.RequestException as e:
+        logging.warning(f"Jikan MAL lookup failed: {e}")
+        return None
 
 
 def search_huno_dupes(tmdb_id: int, category_id: int, huno_api: str) -> list:
@@ -454,6 +503,13 @@ def main():
         action="store_true",
         default=False,
         help="Force a full run even if a previous run for this content is detected"
+    )
+    parser.add_argument(
+        "--mal",
+        action="store",
+        type=int,
+        help="MyAnimeList ID — auto-detected for anime, or provide manually to override",
+        default=None
     )
     parser.add_argument(
         "-D", "--debug", action="store_true", help="debug mode", default=False
@@ -784,6 +840,23 @@ def main():
             except requests.RequestException as e:
                 logging.warning(f"Could not fetch external IDs: {e}")
 
+        # --- Anime detection and MAL ID resolution ---
+        MAL_ID = arg.mal  # Start with manually supplied value (may be None)
+        title_for_mal = (
+            media_file.metadata.get('title') if arg.movie
+            else media_file.metadata.get('name', '')
+        )
+        if MAL_ID is None:
+            if is_anime(media_file.metadata, arg.movie):
+                logging.info(f"Anime detected for '{title_for_mal}'. Searching Jikan for MAL ID...")
+                MAL_ID = lookup_mal_id(title_for_mal, arg.movie)
+                if MAL_ID:
+                    logging.info(f"MAL ID found: {MAL_ID}")
+                else:
+                    logging.warning("Could not find MAL ID via Jikan. You can provide it manually with --mal.")
+            else:
+                logging.debug("Not detected as anime — skipping MAL lookup.")
+
         generate_bbcode(media_file.tmdb_id, media_file.metadata.get('overview', ''), runDir, tmdb_api, arg.movie, arg.notes)
 
         is_season_pack = 1 if (not arg.movie and not arg.episode and isFolder == 2) else 0
@@ -807,6 +880,8 @@ def main():
             data['source_type'] = source_type_id
         if arg.edition:
             data['edition'] = arg.edition
+        if MAL_ID:
+            data['mal'] = MAL_ID
 
         if not arg.movie:
             season_val = media_file.guessit_info.get("season", 0)
@@ -846,6 +921,7 @@ def main():
         def _do_manual_upload(manual_data=None):
             if manual_data is None:
                 manual_data = _build_manual_data()
+            print_huno_payload_preview(manual_data, torrentFileName, source)
             if getUserInput("Do you want to upload this to HUNO?"):
                 with open(desc_path, 'rb') as desc_f, \
                      open(mediainfo_path, 'rb') as mi_f, \
@@ -885,7 +961,8 @@ def main():
             print("  *** the upload complies with all HUNO rules. Rule violations are your liability.")
 
         manual_data = _build_manual_data() if arg.manual else None
-        print_huno_payload_preview(manual_data if arg.manual else data, torrentFileName, source)
+        if not arg.manual:
+            print_huno_payload_preview(data, torrentFileName, source)
 
         logging.info("Checking HUNO for existing releases...")
         dupes = search_huno_dupes(int(media_file.tmdb_id), 1 if arg.movie else 2, huno_api)
