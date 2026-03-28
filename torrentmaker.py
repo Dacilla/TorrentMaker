@@ -509,6 +509,12 @@ def main():
             ).strip()
             group = group_input if group_input else 'NOGRP'
 
+    # If the group is a member encoder of a known encoding group, append the parent group name
+    for parent_group, members in encoderGroups.items():
+        if group in members:
+            group = f"{group} {parent_group}"
+            break
+
     source = arg.source or ""
     if not source:
         source = detect_source_from_filename(media_file.filename)
@@ -790,7 +796,20 @@ def get_prominent_color(tmdb_id, api_key, directory, isMovie):
     logging.info("Poster downloaded. Analyzing colors...")
     color_thief = ColorThief(poster_file_path)
     dominant_colour = color_thief.get_color(quality=1)
-    return dominant_colour
+    return _ensure_readable_on_dark(dominant_colour)
+
+
+def _ensure_readable_on_dark(rgb):
+    """Shift a color's lightness up so it reads well on a dark background,
+    while preserving the hue and saturation from the source poster."""
+    import colorsys
+    r, g, b = (c / 255.0 for c in rgb)
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    # Minimum lightness of 0.65 keeps text comfortably readable on dark backgrounds.
+    # Cap at 0.88 to avoid washed-out near-white that loses its identity.
+    l = max(0.65, min(l, 0.88))
+    r2, g2, b2 = colorsys.hls_to_rgb(h, l, s)
+    return (round(r2 * 255), round(g2 * 255), round(b2 * 255))
 
 def create_optimized_screenshots(videoFile, runDir):
     logging.info("Making optimized screenshots...")

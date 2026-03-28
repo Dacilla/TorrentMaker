@@ -117,6 +117,10 @@ class MediaFile:
         return result
 
 
+    def is_rm4k(self) -> bool:
+        """Detects if the release is a RM4K (remux upscale from 4K) release."""
+        return bool(re.search(r'\brm4k\b', self.filename, re.IGNORECASE))
+
     def get_video_codec(self, source: str) -> str:
         """Determines the video codec based on MediaInfo, filename and source."""
         if not self.video_track:
@@ -294,6 +298,7 @@ class Movie(MediaFile):
         audio = self.get_audio_info()
         container = self.guessit_info.get('container', 'mkv')
 
+        rm4k_tag = "RM4K " if self.is_rm4k() else ""
         if huno_format:
             colour_space = self.get_colour_space()
             try:
@@ -305,12 +310,12 @@ class Movie(MediaFile):
                     logging.error("No language provided. Cannot continue.")
                     sys.exit(1)
             base_name = f"{title} ({year})"
-            details = f"{resolution} {source} {video_codec} {colour_space} {audio} {language} - {group}"
+            details = f"{resolution} {rm4k_tag}{source} {video_codec} {colour_space} {audio} {language} - {group}"
             filename = f"{base_name} ({details}).{container}"
         else:
             if video_codec == "H264": video_codec = "H.264"
             elif video_codec == "H265": video_codec = "H.265"
-            parts = [title, year, resolution, source, audio.replace(' ', ''), video_codec]
+            parts = [title, year, resolution, f"{rm4k_tag}{source}".strip(), audio.replace(' ', ''), video_codec]
             filename = '.'.join(filter(None, parts)) + f"-{group}.{container}"
             filename = filename.replace(' ', '.')
 
@@ -396,6 +401,7 @@ class TVShow(MediaFile):
             if episode_title:
                 episode_num += f" - {episode_title}"
 
+        rm4k_tag = "RM4K " if self.is_rm4k() else ""
         if huno_format:
             colour_space = self.get_colour_space()
             try:
@@ -407,12 +413,12 @@ class TVShow(MediaFile):
                     logging.error("No language provided. Cannot continue.")
                     sys.exit(1)
             base_name = f"{show_name} ({year}) {episode_num}"
-            details = f"{resolution} {source} {video_codec} {colour_space} {audio} {language} - {group}"
+            details = f"{resolution} {rm4k_tag}{source} {video_codec} {colour_space} {audio} {language} - {group}"
             filename = f"{base_name} ({details}).{container}"
         else:
             if video_codec == "H264": video_codec = "H.264"
             elif video_codec == "H265": video_codec = "H.265"
-            parts = [show_name, year, episode_num, resolution, source, audio.replace(' ', ''), video_codec]
+            parts = [show_name, year, episode_num, resolution, f"{rm4k_tag}{source}".strip(), audio.replace(' ', ''), video_codec]
             filename = '.'.join(filter(None, parts)) + f"-{group}.{container}"
             filename = filename.replace(' ', '.')
 
