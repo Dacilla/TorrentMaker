@@ -91,6 +91,17 @@ Scripts accept a `bulkProcess.txt` file (one path per line) when no `-p`/`-m` ar
 | `mutagen` | Audio file tag read/write |
 | `colorthief` | Dominant color extraction from posters (for BBCode theming) |
 
+## API Documentation
+
+Local reference docs are checked into the repo root — consult these before guessing at API fields or endpoints:
+
+| File | Contents |
+|------|----------|
+| `huno-api-docs.md` | HUNO tracker upload API — endpoint, field names, accepted values |
+| `huno-upload-guide.md` | HUNO upload guide — category/type/source enums, torrent naming rules |
+| `red-api-docs.md` | REDacted (RED) API — torrent upload, group create, format/encoding enums |
+| `ops-api-docs.md` | Orpheus (OPS) API — same structure as RED docs |
+
 ## Configuration
 
 All settings live in `settings.ini` under `[DEFAULT]`. Key sections: torrent client (QBIT_*), image hosts (PTPIMG_API, IMGBB_API, CATBOX_HASH), tracker APIs (HUNO_API, RED_API, OPS_API), tracker announce URLs, seeding directory path, and seedbox FTP/qBit credentials. `config_loader.py` is the single source of truth for field names — add new config fields there.

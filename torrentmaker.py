@@ -58,6 +58,13 @@ RESOLUTION_ID_MAP = {
     "720p": 5, "576p": 6, "576i": 7, "540p": 11, "480p": 8, "480i": 9,
 }
 
+# Maps audio channel string (from get_audio_info) to HUNO audio_channel_id
+AUDIO_CHANNEL_ID_MAP = {
+    "13.1": 1, "12.1": 2, "11.1": 3, "10.1": 4, "9.1": 5,
+    "7.1": 6, "6.1": 7, "5.1": 8, "5.0": 9, "4.0": 10,
+    "2.1": 11, "2.0": 12, "1.0": 13,
+}
+
 # Known streaming service filename tokens → canonical abbreviation
 STREAMING_SERVICES = {
     'amzn': 'AMZN', 'amazon': 'AMZN',
@@ -191,14 +198,22 @@ def _resolve_source_type_id(source: str) -> int | None:
 _HUNO_TYPE_NAMES = {1: 'DISC', 2: 'REMUX', 3: 'WEB', 15: 'ENCODE'}
 _HUNO_CATEGORY_NAMES = {1: 'Movie', 2: 'TV Show'}
 _HUNO_RESOLUTION_NAMES = {v: k for k, v in RESOLUTION_ID_MAP.items()}
+_HUNO_SOURCE_TYPE_NAMES = {
+    1: 'UHD BluRay', 2: 'UHD BluRay Hybrid', 3: 'BluRay', 4: 'BluRay Hybrid',
+    5: 'HD-DVD', 6: 'HD-DVD Hybrid', 7: 'DVD9', 8: 'DVD5',
+    9: 'WEB-DL', 10: 'WEB-DL Hybrid', 11: 'HDTV', 12: 'SDTV', 13: 'DVD',
+}
+_HUNO_AUDIO_CHANNEL_NAMES = {v: k for k, v in AUDIO_CHANNEL_ID_MAP.items()}
 
 
 def print_huno_payload_preview(data: dict, torrent_name: str, source: str):
     """Prints a human-readable preview of the HUNO upload payload."""
+    is_manual = data.get('mode') == 'manual'
+    header = "  HUNO UPLOAD PAYLOAD PREVIEW (MANUAL MODE)" if is_manual else "  HUNO UPLOAD PAYLOAD PREVIEW"
     lines = [
         "",
         "=" * 62,
-        "  HUNO UPLOAD PAYLOAD PREVIEW",
+        header,
         "=" * 62,
         f"  Torrent name  : {torrent_name}",
         f"  Source string : {source or '(not set)'}",
@@ -206,22 +221,54 @@ def print_huno_payload_preview(data: dict, torrent_name: str, source: str):
         f"  category_id   : {data.get('category_id')} ({_HUNO_CATEGORY_NAMES.get(data.get('category_id'), '?')})",
         f"  type_id       : {data.get('type_id')} ({_HUNO_TYPE_NAMES.get(data.get('type_id'), '?')})",
         f"  resolution_id : {data.get('resolution_id')} ({_HUNO_RESOLUTION_NAMES.get(data.get('resolution_id'), '?')})",
-        f"  source_type   : {data.get('source_type', '(not sent)')}",
+    ]
+    # source field name differs between auto and manual mode
+    if 'source_type_id' in data:
+        sid = data.get('source_type_id')
+        lines.append(f"  source_type_id: {sid} ({_HUNO_SOURCE_TYPE_NAMES.get(sid, '?')})")
+    else:
+        st = data.get('source_type')
+        st_label = f" ({_HUNO_SOURCE_TYPE_NAMES.get(st, '?')})" if st is not None else ''
+        lines.append(f"  source_type   : {st if st is not None else '(not sent)'}{st_label}")
+    lines += [
         f"  tmdb          : {data.get('tmdb')}",
         f"  imdb          : {data.get('imdb')}",
         f"  tvdb          : {data.get('tvdb', '(n/a)')}",
-        f"  video_codec   : {data.get('video_codec')}",
-        f"  video_format  : {data.get('video_format')}",
-        f"  audio_format  : {data.get('audio_format')}",
-        f"  audio_channels: {data.get('audio_channels')}",
-        f"  season_pack   : {data.get('season_pack', '(n/a)')}",
     ]
+    # codec/format field names differ between auto and manual mode
+    if 'video_codec_id' in data:
+        lines.append(f"  video_codec_id: {data.get('video_codec_id')}")
+    else:
+        lines.append(f"  video_codec   : {data.get('video_codec')}")
+    if 'video_format_id' in data:
+        lines.append(f"  video_format_id:{data.get('video_format_id')}")
+    else:
+        lines.append(f"  video_format  : {data.get('video_format')}")
+    if 'audio_format_id' in data:
+        lines.append(f"  audio_format_id:{data.get('audio_format_id')}")
+    else:
+        lines.append(f"  audio_format  : {data.get('audio_format')}")
+    # audio channel field name differs between auto and manual mode
+    if 'audio_channel_id' in data:
+        cid = data.get('audio_channel_id')
+        lines.append(f"  audio_channel_id:{cid} ({_HUNO_AUDIO_CHANNEL_NAMES.get(cid, '?')})")
+    else:
+        lines.append(f"  audio_channels: {data.get('audio_channels')}")
+    lines.append(f"  season_pack   : {data.get('season_pack', '(n/a)')}")
     if 'season_number' in data:
         lines.append(f"  season_number : {data.get('season_number')}")
     if 'episode_number' in data:
         lines.append(f"  episode_number: {data.get('episode_number')}")
     if 'edition' in data:
         lines.append(f"  edition       : {data.get('edition')}")
+    # manual-mode-only fields
+    if is_manual:
+        lines += [
+            "-" * 62,
+            f"  name          : {data.get('name')}",
+            f"  release_group : {data.get('release_group')}",
+            f"  media_language: {data.get('media_language_id')}",
+        ]
     lines.append("=" * 62)
     print('\n'.join(lines))
 
@@ -246,7 +293,17 @@ def search_huno_dupes(tmdb_id: int, category_id: int, huno_api: str) -> list:
         resp.raise_for_status()
         body = resp.json()
         data = body.get('data', [])
-        return data if isinstance(data, list) else data.get('data', [])
+        if not isinstance(data, list):
+            data = data.get('data', [])
+        # Unwrap JSON:API format: {"type": "torrents", "attributes": {...}}
+        unwrapped = []
+        for item in data:
+            if isinstance(item, dict) and 'attributes' in item:
+                merged = {**item.get('attributes', {}), 'id': item.get('id')}
+                unwrapped.append(merged)
+            else:
+                unwrapped.append(item)
+        return unwrapped
     except requests.RequestException as e:
         logging.warning(f"HUNO dupe search failed: {e}")
         return []
@@ -254,22 +311,25 @@ def search_huno_dupes(tmdb_id: int, category_id: int, huno_api: str) -> list:
 
 def print_huno_dupes(dupes: list):
     """Print a formatted table of potential duplicate torrents found on HUNO."""
+    names = [(t.get('name') or '') for t in dupes]
+    name_col = max((len(n) for n in names), default=4)
+    name_col = max(name_col, 4)
+    total = 2 + name_col + 1 + 7 + 7 + 6 + 6
     lines = [
         "",
-        "=" * 78,
+        "=" * total,
         "  POTENTIAL DUPLICATES FOUND ON HUNO",
-        "=" * 78,
-        f"  {'Name':<42} {'Type':<7} {'Res':<7} {'Codec':<6} {'Seeds':>5}",
-        "-" * 78,
+        "=" * total,
+        f"  {'Name':<{name_col}} {'Type':<7} {'Res':<7} {'Codec':<6} {'Seeds':>5}",
+        "-" * total,
     ]
-    for t in dupes:
-        name = (t.get('name') or '')[:42]
+    for t, name in zip(dupes, names):
         type_name = (t.get('type') or {}).get('name', '?') if isinstance(t.get('type'), dict) else str(t.get('type', '?'))
         resolution = (t.get('resolution') or {}).get('name', '?') if isinstance(t.get('resolution'), dict) else str(t.get('resolution', '?'))
         codec = (t.get('video_codec') or {}).get('name', '?') if isinstance(t.get('video_codec'), dict) else str(t.get('video_codec', '?'))
         seeders = t.get('seeders', '?')
-        lines.append(f"  {name:<42} {type_name:<7} {resolution:<7} {codec:<6} {str(seeders):>5}")
-    lines.append("=" * 78)
+        lines.append(f"  {name:<{name_col}} {type_name:<7} {resolution:<7} {codec:<6} {str(seeders):>5}")
+    lines.append("=" * total)
     print('\n'.join(lines))
 
 
@@ -345,6 +405,12 @@ def main():
         action="store_true",
         default=False,
         help="Enable to upload torrent to HUNO, using api key found in settings.ini"
+    )
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        default=False,
+        help="Upload to HUNO in manual mode immediately, bypassing auto-parsing (requires --huno)"
     )
     parser.add_argument(
         "--throttle",
@@ -749,7 +815,77 @@ def main():
                 episode_val = media_file.guessit_info.get("episode", 0)
                 data["episode_number"] = int(re.sub(r'\D', '', str(episode_val))) if episode_val else 0
 
-        print_huno_payload_preview(data, torrentFileName, source)
+        desc_path = os.path.join(runDir, "showDesc.txt")
+        mediainfo_path = os.path.join(runDir, "mediainfo.txt")
+        torrent_path = os.path.join(runDir, torrentFileName)
+        headers = {"Authorization": f"Bearer {huno_api}", "Accept": "application/json"}
+
+        def _build_manual_data():
+            release_name = re.sub(r'\.torrent$', '', torrentFileName, flags=re.IGNORECASE)
+            release_group = release_name.rsplit('-', 1)[-1].strip().rstrip(')') if '-' in release_name else ''
+            try:
+                media_language = media_file.get_language_name()
+            except Exception:
+                media_language = "English"
+            audio_channel_id = AUDIO_CHANNEL_ID_MAP.get(audio_channels, audio_channels)
+            md = {**data, 'mode': 'manual', 'name': release_name,
+                  'release_group': release_group,
+                  'media_language_id': media_language}
+            for old_key, new_key in [
+                ('video_codec', 'video_codec_id'),
+                ('video_format', 'video_format_id'),
+                ('audio_format', 'audio_format_id'),
+                ('source_type', 'source_type_id'),
+            ]:
+                if old_key in md:
+                    md[new_key] = md.pop(old_key)
+            md.pop('audio_channels', None)
+            md['audio_channel_id'] = audio_channel_id
+            return md
+
+        def _do_manual_upload(manual_data=None):
+            if manual_data is None:
+                manual_data = _build_manual_data()
+            if getUserInput("Do you want to upload this to HUNO?"):
+                with open(desc_path, 'rb') as desc_f, \
+                     open(mediainfo_path, 'rb') as mi_f, \
+                     open(torrent_path, 'rb') as torrent_f:
+                    files = {
+                        'torrent': (torrentFileName, torrent_f, 'application/x-bittorrent'),
+                        'description': ('description.txt', desc_f, 'text/plain'),
+                        'mediainfo': ('mediainfo.txt', mi_f, 'text/plain'),
+                    }
+                    resp = requests.post(
+                        url=HUNO_API_URL,
+                        headers=headers,
+                        data=manual_data,
+                        files=files,
+                        timeout=60,
+                    )
+                if resp.status_code == 422:
+                    res = resp.json()
+                    logging.error(f"HUNO manual upload rejected: {res.get('message')}")
+                    logging.error(f"Details: {res.get('data')}")
+                    return False
+                else:
+                    resp.raise_for_status()
+                    res = resp.json()
+                    if res.get("success"):
+                        logging.info(f"HUNO upload successful (manual mode): {res.get('message')}")
+                        if res.get("data", {}).get("warnings"):
+                            logging.warning(f"HUNO warnings: {res['data']['warnings']}")
+                        return True
+                    else:
+                        logging.error(f"HUNO manual upload failed: {res.get('message')}")
+                        logging.error(f"Details: {res.get('data')}")
+            return False
+
+        if arg.manual:
+            print("\n  *** WARNING: In manual mode you are solely responsible for ensuring")
+            print("  *** the upload complies with all HUNO rules. Rule violations are your liability.")
+
+        manual_data = _build_manual_data() if arg.manual else None
+        print_huno_payload_preview(manual_data if arg.manual else data, torrentFileName, source)
 
         logging.info("Checking HUNO for existing releases...")
         dupes = search_huno_dupes(int(media_file.tmdb_id), 1 if arg.movie else 2, huno_api)
@@ -759,11 +895,9 @@ def main():
         else:
             print("\n  No existing releases found on HUNO for this title.")
 
-        if arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
-            desc_path = os.path.join(runDir, "showDesc.txt")
-            mediainfo_path = os.path.join(runDir, "mediainfo.txt")
-            torrent_path = os.path.join(runDir, torrentFileName)
-            headers = {"Authorization": f"Bearer {huno_api}", "Accept": "application/json"}
+        if arg.manual:
+            upload_succeeded = _do_manual_upload(manual_data)
+        elif arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
             try:
                 with open(desc_path, 'rb') as desc_f, \
                      open(mediainfo_path, 'rb') as mi_f, \
@@ -788,6 +922,13 @@ def main():
                     result = response.json()
                     logging.error(f"HUNO upload rejected — attribute mismatch: {result.get('message')}")
                     logging.error(f"Details: {result.get('data')}")
+                    api_message = result.get('message') or ''
+                    if 'mode=manual' in api_message:
+                        print("\n  The API suggests retrying with manual mode, which bypasses auto-parsing.")
+                        print("  *** WARNING: In manual mode you are solely responsible for ensuring")
+                        print("  *** the upload complies with all HUNO rules. Rule violations are your liability.")
+                        if getUserInput("Retry upload with manual mode?"):
+                            upload_succeeded = _do_manual_upload()
                 else:
                     response.raise_for_status()
                     result = response.json()
