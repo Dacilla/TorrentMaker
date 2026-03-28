@@ -226,6 +226,53 @@ def print_huno_payload_preview(data: dict, torrent_name: str, source: str):
     print('\n'.join(lines))
 
 
+HUNO_FILTER_URL = "https://hawke.uno/api/torrents/filter"
+
+
+def search_huno_dupes(tmdb_id: int, category_id: int, huno_api: str) -> list:
+    """Search HUNO for existing torrents matching the given TMDB ID and category.
+    Returns a list of torrent dicts from the API response, or [] on failure.
+    """
+    params = {
+        'tmdbId': tmdb_id,
+        'categories[]': category_id,
+        'perPage': 100,
+        'sortField': 'created_at',
+        'sortDirection': 'desc',
+    }
+    headers = {"Authorization": f"Bearer {huno_api}", "Accept": "application/json"}
+    try:
+        resp = requests.get(HUNO_FILTER_URL, headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        body = resp.json()
+        data = body.get('data', [])
+        return data if isinstance(data, list) else data.get('data', [])
+    except requests.RequestException as e:
+        logging.warning(f"HUNO dupe search failed: {e}")
+        return []
+
+
+def print_huno_dupes(dupes: list):
+    """Print a formatted table of potential duplicate torrents found on HUNO."""
+    lines = [
+        "",
+        "=" * 78,
+        "  POTENTIAL DUPLICATES FOUND ON HUNO",
+        "=" * 78,
+        f"  {'Name':<42} {'Type':<7} {'Res':<7} {'Codec':<6} {'Seeds':>5}",
+        "-" * 78,
+    ]
+    for t in dupes:
+        name = (t.get('name') or '')[:42]
+        type_name = (t.get('type') or {}).get('name', '?') if isinstance(t.get('type'), dict) else str(t.get('type', '?'))
+        resolution = (t.get('resolution') or {}).get('name', '?') if isinstance(t.get('resolution'), dict) else str(t.get('resolution', '?'))
+        codec = (t.get('video_codec') or {}).get('name', '?') if isinstance(t.get('video_codec'), dict) else str(t.get('video_codec', '?'))
+        seeders = t.get('seeders', '?')
+        lines.append(f"  {name:<42} {type_name:<7} {resolution:<7} {codec:<6} {str(seeders):>5}")
+    lines.append("=" * 78)
+    print('\n'.join(lines))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Script to automate creation of torrent files, as well as grabbing mediainfo dump, screenshots, and tmdb description"
@@ -400,18 +447,6 @@ def main():
         logging.error("Input not a file or directory")
         sys.exit()
 
-    # --- Create Run Directory ---
-    if not os.path.isdir("runs"): os.makedirs("runs/001")
-    run_dirs = [d for d in os.listdir("runs") if d.isdigit()]
-    next_run_num = max([int(d) for d in run_dirs]) + 1 if run_dirs else 1
-    runDir = os.path.join("runs", str(next_run_num).zfill(3))
-    os.makedirs(runDir)
-    logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
-
-    # Write source path so future runs can detect and reuse this run
-    with open(os.path.join(runDir, "source_path.txt"), 'w', encoding='utf-8') as _spf:
-        _spf.write(os.path.normpath(os.path.abspath(path)))
-
     # --- Check for a previous run of the same content ---
     prev_run = None
     reusing = False
@@ -446,7 +481,19 @@ def main():
                 if arg.skipPrompt or getUserInput(msg):
                     reusing = True
                     logging.info("Reusing assets from previous run.")
-    
+
+    # --- Create Run Directory ---
+    if not os.path.isdir("runs"): os.makedirs("runs/001")
+    run_dirs = [d for d in os.listdir("runs") if d.isdigit()]
+    next_run_num = max([int(d) for d in run_dirs]) + 1 if run_dirs else 1
+    runDir = os.path.join("runs", str(next_run_num).zfill(3))
+    os.makedirs(runDir)
+    logging.info(f"Created folder for output in {os.path.relpath(runDir)}")
+
+    # Write source path so future runs can detect and reuse this run
+    with open(os.path.join(runDir, "source_path.txt"), 'w', encoding='utf-8') as _spf:
+        _spf.write(os.path.normpath(os.path.abspath(path)))
+
     # --- Find the primary video file ---
     videoFile = None
     if isFolder == 1:
@@ -703,6 +750,15 @@ def main():
                 data["episode_number"] = int(re.sub(r'\D', '', str(episode_val))) if episode_val else 0
 
         print_huno_payload_preview(data, torrentFileName, source)
+
+        logging.info("Checking HUNO for existing releases...")
+        dupes = search_huno_dupes(int(media_file.tmdb_id), 1 if arg.movie else 2, huno_api)
+        if dupes:
+            print_huno_dupes(dupes)
+            print(f"\n  {len(dupes)} existing release(s) found for this title on HUNO.")
+        else:
+            print("\n  No existing releases found on HUNO for this title.")
+
         if arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
             desc_path = os.path.join(runDir, "showDesc.txt")
             mediainfo_path = os.path.join(runDir, "mediainfo.txt")
