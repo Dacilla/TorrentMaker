@@ -327,7 +327,7 @@ class Movie(MediaFile):
             logging.error(f"Failed to fetch TMDB data for movie ID {self.tmdb_id}: {e}")
             return {}
 
-    def generate_name(self, source: str, group: str, huno_format: bool, is_season_pack: bool = False) -> str:
+    def generate_name(self, source: str, group: str, huno_format: bool, is_season_pack: bool = False, edition: str = None) -> str:
         """Generates a standardized filename for the movie."""
         if not self.metadata: return ""
 
@@ -352,7 +352,8 @@ class Movie(MediaFile):
                 if not language:
                     logging.error("No language provided. Cannot continue.")
                     sys.exit(1)
-            base_name = f"{title} ({year})"
+            edition_part = f" {edition}" if edition else ""
+            base_name = f"{title} ({year}){edition_part}"
             details = f"{resolution} {rm4k_tag}{source} {video_codec} {colour_space} {audio} {language} - {group}"
             filename = f"{base_name} ({details}).{container}"
         else:
@@ -398,7 +399,7 @@ class TVShow(MediaFile):
             logging.error(f"Failed to fetch TMDB data for TV show ID {self.tmdb_id}: {e}")
             return {}
 
-    def generate_name(self, source: str, group: str, huno_format: bool, is_season_pack: bool = False) -> str:
+    def generate_name(self, source: str, group: str, huno_format: bool, is_season_pack: bool = False, edition: str = None) -> str:
         """Generates a standardized filename for the TV episode or season pack."""
         if not self.metadata: return ""
 
@@ -464,7 +465,8 @@ class TVShow(MediaFile):
                 if not language:
                     logging.error("No language provided. Cannot continue.")
                     sys.exit(1)
-            base_name = f"{show_name} ({year}) {episode_num}"
+            edition_part = f" {edition}" if edition else ""
+            base_name = f"{show_name} ({year}){edition_part} {episode_num}"
             details = f"{resolution} {rm4k_tag}{source} {video_codec} {colour_space} {audio} {language} - {group}"
             filename = f"{base_name} ({details}).{container}"
         else:

@@ -106,6 +106,51 @@ def _get_huno_type_id(source: str, video_codec: str) -> int:
     return _HUNO_TYPE_WEB  # Safe fallback
 
 
+# Ordered by specificity (longer/more-specific phrases first to avoid partial matches)
+_HUNO_EDITIONS = [
+    "4K Remaster",
+    "Directors Cut",
+    "Director's Cut",
+    "Open Matte",
+    "Final Cut",
+    "Anniversary",
+    "Remastered",
+    "Theatrical",
+    "Collectors",
+    "Assembly",
+    "Extended",
+    "Ultimate",
+    "Restored",
+    "Unrated",
+    "Special",
+    "Limited",
+    "Superbit",
+    "Redux",
+    "IMAX",
+    "Uncut",
+    "3D",
+]
+
+
+def detect_edition_from_path(path: str) -> str | None:
+    """Detects a HUNO-recognised edition tag from a file or folder path.
+    Returns the canonical edition string (e.g. 'Unrated') or None if not found.
+    Director's Cut is normalised to 'Directors Cut' for HUNO compatibility.
+    """
+    # Search both the basename and any parent folder name
+    haystack = os.path.basename(os.path.normpath(path))
+    # Also include parent directory name in case file is inside a named folder
+    parent = os.path.basename(os.path.dirname(os.path.normpath(path)))
+    combined = f"{parent} {haystack}"
+    for edition in _HUNO_EDITIONS:
+        # Case-insensitive whole-word match
+        pattern = r'(?<![A-Za-z])' + re.escape(edition) + r'(?![A-Za-z])'
+        if re.search(pattern, combined, re.IGNORECASE):
+            # Normalise Director's Cut → Directors Cut
+            return edition.replace("Director's Cut", "Directors Cut")
+    return None
+
+
 def detect_source_from_filename(filename: str) -> str:
     """Attempts to detect source type (and streaming service) from a filename.
     Returns e.g. 'AMZN WEB-DL', 'BluRay Remux', 'NF WEB-DL', or '' on failure.
@@ -750,15 +795,18 @@ def main():
                 sys.exit(1)
     if source.lower() == 'blu-ray': source = 'BluRay'
 
+    edition = arg.edition
+    if not edition:
+        edition = detect_edition_from_path(path)
+        if edition:
+            logging.info(f"Auto-detected edition: '{edition}'")
+
     try:
-        torrentFileName = media_file.generate_name(source=source, group=group, huno_format=True, is_season_pack=is_season_pack)
+        torrentFileName = media_file.generate_name(source=source, group=group, huno_format=True, is_season_pack=is_season_pack, edition=edition)
     except RuntimeError as e:
         logging.error(e)
         sys.exit(1)
-    
-    if arg.edition:
-        base, ext = os.path.splitext(torrentFileName)
-        torrentFileName = f"{base} ({arg.edition}){ext}"
+
     if "repack" in path.lower() or 'v2' in path.lower():
         base, ext = os.path.splitext(torrentFileName)
         torrentFileName = f"{base} [REPACK]{ext}"
@@ -922,8 +970,8 @@ def main():
         }
         if source_type_id is not None:
             data['source_type'] = source_type_id
-        if arg.edition:
-            data['edition'] = arg.edition
+        if edition:
+            data['edition'] = edition
         if MAL_ID:
             data['mal'] = MAL_ID
 
