@@ -254,20 +254,30 @@ class MediaFile:
         return "HDR"
 
     def get_language_name(self) -> str:
-        """Gets the audio language label: MULTI (3+ primary tracks), DUAL (2 primary tracks),
-        or the language display name (1 primary track)."""
+        """Gets the audio language label: MULTI (3+ unique-language primary tracks),
+        DUAL (2 primary tracks with different languages), or the language display name
+        (all primary tracks share the same language)."""
         primary_tracks = self._get_primary_audio_tracks()
 
         if not primary_tracks:
             raise ValueError("No primary audio tracks found.")
 
-        if len(primary_tracks) >= 3:
+        # Collect unique language codes across primary tracks
+        lang_codes = list(dict.fromkeys(
+            t.get('Language', '').lower() for t in primary_tracks
+        ))
+        # Treat missing language as same-language (don't falsely flag as multi-lingual)
+        lang_codes = [c for c in lang_codes if c]
+
+        unique_langs = len(set(lang_codes)) if lang_codes else 1
+
+        if unique_langs >= 3:
             return 'MULTI'
 
-        if len(primary_tracks) == 2:
+        if unique_langs == 2:
             return 'DUAL'
 
-        # Single primary track
+        # All primary tracks share the same language (or have no language tag) — use first track
         track = primary_tracks[0]
         lang_code = track.get('Language', '')
         if not lang_code:

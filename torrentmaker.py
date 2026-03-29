@@ -358,18 +358,33 @@ def search_huno_dupes(tmdb_id: int, category_id: int, huno_api: str) -> list:
         return []
 
 
-def print_huno_dupes(dupes: list):
+def _format_size(size_bytes) -> str:
+    """Convert a byte count to a human-readable string (e.g. '4.72 GB')."""
+    try:
+        n = float(size_bytes)
+    except (TypeError, ValueError):
+        return '?'
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if abs(n) < 1024.0:
+            return f"{n:.2f} {unit}"
+        n /= 1024.0
+    return f"{n:.2f} PB"
+
+
+def print_huno_dupes(dupes: list, target_size: int = None, target_file_count: int = None):
     """Print a formatted table of potential duplicate torrents found on HUNO."""
     names = [(t.get('name') or '') for t in dupes]
     name_col = max((len(n) for n in names), default=4)
     name_col = max(name_col, 4)
-    total = 2 + name_col + 1 + 7 + 7 + 6 + 6
+    size_col = 9   # e.g. "4.72 GB"
+    files_col = 5  # "Files"
+    total = 2 + name_col + 1 + 7 + 7 + 6 + size_col + 1 + files_col + 6
     lines = [
         "",
         "=" * total,
         "  POTENTIAL DUPLICATES FOUND ON HUNO",
         "=" * total,
-        f"  {'Name':<{name_col}} {'Type':<7} {'Res':<7} {'Codec':<6} {'Seeds':>5}",
+        f"  {'Name':<{name_col}} {'Type':<7} {'Res':<7} {'Codec':<6} {'Size':>{size_col}} {'Files':>{files_col}} {'Seeds':>5}",
         "-" * total,
     ]
     for t, name in zip(dupes, names):
@@ -377,8 +392,18 @@ def print_huno_dupes(dupes: list):
         resolution = (t.get('resolution') or {}).get('name', '?') if isinstance(t.get('resolution'), dict) else str(t.get('resolution', '?'))
         codec = (t.get('video_codec') or {}).get('name', '?') if isinstance(t.get('video_codec'), dict) else str(t.get('video_codec', '?'))
         seeders = t.get('seeders', '?')
-        lines.append(f"  {name:<{name_col}} {type_name:<7} {resolution:<7} {codec:<6} {str(seeders):>5}")
+        size_str = _format_size(t.get('size')) if t.get('size') is not None else '?'
+        num_files = t.get('num_files')
+        files_str = str(num_files) if num_files is not None else '?'
+        lines.append(f"  {name:<{name_col}} {type_name:<7} {resolution:<7} {codec:<6} {size_str:>{size_col}} {files_str:>{files_col}} {str(seeders):>5}")
     lines.append("=" * total)
+    if target_size is not None or target_file_count is not None:
+        parts = []
+        if target_size is not None:
+            parts.append(f"size: {_format_size(target_size)}")
+        if target_file_count is not None:
+            parts.append(f"files: {target_file_count}")
+        lines.append(f"  Upload target — {', '.join(parts)}")
     print('\n'.join(lines))
 
 
@@ -568,6 +593,21 @@ def main():
     if isFolder not in [1, 2]:
         logging.error("Input not a file or directory")
         sys.exit()
+
+    # Compute target size and file count for dupe comparison display
+    if isFolder == 1:
+        target_size = os.path.getsize(path)
+        target_file_count = 1
+    else:
+        target_size = 0
+        target_file_count = 0
+        for _root, _, _files in os.walk(path):
+            for _f in _files:
+                try:
+                    target_size += os.path.getsize(os.path.join(_root, _f))
+                    target_file_count += 1
+                except OSError:
+                    pass
 
     # --- Check for a previous run of the same content ---
     prev_run = None
@@ -967,7 +1007,7 @@ def main():
         logging.info("Checking HUNO for existing releases...")
         dupes = search_huno_dupes(int(media_file.tmdb_id), 1 if arg.movie else 2, huno_api)
         if dupes:
-            print_huno_dupes(dupes)
+            print_huno_dupes(dupes, target_size, target_file_count)
             print(f"\n  {len(dupes)} existing release(s) found for this title on HUNO.")
         else:
             print("\n  No existing releases found on HUNO for this title.")
