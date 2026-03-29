@@ -679,8 +679,13 @@ def main():
             has_torrent = prev_torrent_filename is not None
 
             prev_ss_dir = os.path.join(prev_run, "screenshots")
-            has_screenshots = (os.path.isdir(prev_ss_dir) and
-                               any(f.endswith('.png') for f in os.listdir(prev_ss_dir)))
+            prev_screenshot_count = 0
+            if os.path.isdir(prev_ss_dir):
+                prev_screenshot_count = sum(
+                    1 for f in os.listdir(prev_ss_dir)
+                    if f.startswith('screenshot_') and f.endswith('.png')
+                )
+            has_screenshots = prev_screenshot_count > 0
 
             prev_desc_path = os.path.join(prev_run, "showDesc.txt")
             if os.path.exists(prev_desc_path):
@@ -690,8 +695,11 @@ def main():
                 except OSError:
                     pass
 
+            ss_label = (f"{prev_screenshot_count}/8 screenshots (incomplete)"
+                        if has_screenshots and prev_screenshot_count < 8
+                        else "screenshots")
             available = [n for n, v in [("torrent file", has_torrent),
-                                         ("screenshots", has_screenshots),
+                                         (ss_label, has_screenshots),
                                          ("image links", has_links)] if v]
             if available:
                 msg = (f"Previous run found at {os.path.relpath(prev_run)} "
@@ -837,9 +845,33 @@ def main():
     # --- Screenshot and Upload Logic ---
     screenshot_success = False
     if reusing and has_screenshots:
-        shutil.copytree(os.path.join(prev_run, "screenshots"), os.path.join(runDir, "screenshots"))
-        logging.info(f"Reusing screenshots from {os.path.relpath(prev_run)}.")
-        screenshot_success = True
+        prev_ss_src = os.path.join(prev_run, "screenshots")
+        screenshots_dir = os.path.join(runDir, "screenshots")
+        os.makedirs(screenshots_dir, exist_ok=True)
+        # Copy only valid screenshot_*.png files — skip any leftover temp files
+        for f in os.listdir(prev_ss_src):
+            if f.startswith('screenshot_') and f.endswith('.png'):
+                shutil.copy2(os.path.join(prev_ss_src, f), os.path.join(screenshots_dir, f))
+
+        if prev_screenshot_count < 8:
+            existing_indices = {
+                int(f[len('screenshot_'):len('screenshot_') + 2])
+                for f in os.listdir(screenshots_dir)
+                if f.startswith('screenshot_') and f.endswith('.png')
+            }
+            missing = sorted(i for i in range(8) if i not in existing_indices)
+            logging.info(
+                f"Previous run had {prev_screenshot_count}/8 screenshots. "
+                f"Generating {len(missing)} missing screenshot(s) "
+                f"(indices: {', '.join(str(i) for i in missing)})."
+            )
+            screenshot_success = create_optimized_screenshots(videoFile, runDir, skip_indices=existing_indices)
+            if not screenshot_success:
+                logging.error("Failed to generate missing screenshots. Aborting.")
+                sys.exit(1)
+        else:
+            logging.info(f"Reusing all 8 screenshots from {os.path.relpath(prev_run)}.")
+            screenshot_success = True
     else:
         logging.info("Making screenshots...")
         screenshot_success = create_optimized_screenshots(videoFile, runDir)
@@ -1187,7 +1219,7 @@ def _ensure_readable_on_dark(rgb):
     r2, g2, b2 = colorsys.hls_to_rgb(h, l, s)
     return (round(r2 * 255), round(g2 * 255), round(b2 * 255))
 
-def create_optimized_screenshots(videoFile, runDir):
+def create_optimized_screenshots(videoFile, runDir, skip_indices=None):
     logging.info("Making optimized screenshots...")
     screenshots_dir = os.path.join(runDir, "screenshots")
     if not os.path.isdir(screenshots_dir):
@@ -1208,22 +1240,35 @@ def create_optimized_screenshots(videoFile, runDir):
     total_duration = int(video.get(cv2.CAP_PROP_FRAME_COUNT)) / int(video.get(cv2.CAP_PROP_FPS))
     timestamps = [i * total_duration / 10 for i in range(1, 9)] # 8 screenshots
     successful_screenshots = 0
+    active_temp = None
 
-    for i, timestamp in enumerate(timestamps):
-        video.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-        success, image = video.read()
-        if success:
-            temp_png = os.path.join(screenshots_dir, f"temp_{i:02d}.png")
-            cv2.imwrite(temp_png, image)
-            final_path = os.path.join(screenshots_dir, f"screenshot_{i:02d}.png")
-            optimize_screenshot(temp_png, final_path)
-            os.remove(temp_png)
-            successful_screenshots += 1
-            logging.info(f"Screenshot {i+1}/{len(timestamps)} created.")
-        else:
-            logging.warning(f"Failed to create screenshot at timestamp {timestamp:.2f}s")
-            
-    video.release()
+    try:
+        for i, timestamp in enumerate(timestamps):
+            if skip_indices and i in skip_indices:
+                successful_screenshots += 1
+                continue
+            video.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            success, image = video.read()
+            if success:
+                temp_png = os.path.join(screenshots_dir, f"temp_{i:02d}.png")
+                active_temp = temp_png
+                cv2.imwrite(temp_png, image)
+                final_path = os.path.join(screenshots_dir, f"screenshot_{i:02d}.png")
+                optimize_screenshot(temp_png, final_path)
+                os.remove(temp_png)
+                active_temp = None
+                successful_screenshots += 1
+                logging.info(f"Screenshot {i+1}/{len(timestamps)} created.")
+            else:
+                logging.warning(f"Failed to create screenshot at timestamp {timestamp:.2f}s")
+    except KeyboardInterrupt:
+        logging.warning("Screenshot generation interrupted. Cleaning up temporary files.")
+        raise
+    finally:
+        if active_temp and os.path.exists(active_temp):
+            os.remove(active_temp)
+        video.release()
+
     expected = len(timestamps)
     if successful_screenshots < expected:
         logging.error(
@@ -1275,7 +1320,8 @@ def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash):
     return None
 
 def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbox_hash, max_workers=5):
-    images = sorted([f for f in os.listdir(screenshot_dir) if f.lower().endswith('.png')])
+    images = sorted([f for f in os.listdir(screenshot_dir)
+                     if f.startswith('screenshot_') and f.lower().endswith('.png')])
     if not images:
         logging.warning("No screenshots found to upload!")
         return []
