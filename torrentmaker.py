@@ -43,6 +43,14 @@ HUNO_API_URL = "https://hawke.uno/api/torrents/upload"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# TODO: Improve detection of AV1 WEB Encodes
+# TODO: Check qbit for existing torrent for given path to skip hash calculation
+# TODO: Automatically detect TV vs movie to make -m argument unnecessary
+# TODO: When featurettes are included, add their inclusion as an automatic note in the description
+# TODO: Add argument for personal releases to add a note like 'Please don't upload elsewhere without asking, thanks!'
+# TODO: Filter HUNO dupes by same codec, resolution, and season number (for TV) to better identify true duplicates
+# TODO: Support bulk paths input to upload multiple season packs sequentially
+
 # Maps --source argument (case-insensitive) to HUNO source_type IDs
 SOURCE_TYPE_MAP = {
     'uhd bluray': 1, 'uhd blu-ray': 1, 'uhd bluray hybrid': 2, 'uhd blu-ray hybrid': 2,
