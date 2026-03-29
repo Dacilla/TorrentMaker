@@ -681,10 +681,13 @@ def main():
             prev_ss_dir = os.path.join(prev_run, "screenshots")
             prev_screenshot_count = 0
             if os.path.isdir(prev_ss_dir):
-                prev_screenshot_count = sum(
-                    1 for f in os.listdir(prev_ss_dir)
-                    if f.startswith('screenshot_') and f.endswith('.png')
-                )
+                for f in os.listdir(prev_ss_dir):
+                    if f.startswith('screenshot_') and f.endswith('.png'):
+                        fpath = os.path.join(prev_ss_dir, f)
+                        if is_screenshot_valid(fpath):
+                            prev_screenshot_count += 1
+                        else:
+                            logging.warning(f"Skipping invalid/blank screenshot from previous run: {f}")
             has_screenshots = prev_screenshot_count > 0
 
             prev_desc_path = os.path.join(prev_run, "showDesc.txt")
@@ -850,10 +853,13 @@ def main():
         prev_ss_src = os.path.join(prev_run, "screenshots")
         screenshots_dir = os.path.join(runDir, "screenshots")
         os.makedirs(screenshots_dir, exist_ok=True)
-        # Copy only valid screenshot_*.png files — skip any leftover temp files
+        # Copy only valid screenshot_*.png files — skip leftover temp files and blank/corrupt captures
         for f in os.listdir(prev_ss_src):
             if f.startswith('screenshot_') and f.endswith('.png'):
-                shutil.copy2(os.path.join(prev_ss_src, f), os.path.join(screenshots_dir, f))
+                src_path = os.path.join(prev_ss_src, f)
+                if is_screenshot_valid(src_path):
+                    shutil.copy2(src_path, os.path.join(screenshots_dir, f))
+                # Invalid files are simply not copied; they will be regenerated as missing indices
 
         if prev_screenshot_count < 8:
             existing_indices = {
@@ -1220,6 +1226,26 @@ def _ensure_readable_on_dark(rgb):
     l = max(0.65, min(l, 0.88))
     r2, g2, b2 = colorsys.hls_to_rgb(h, l, s)
     return (round(r2 * 255), round(g2 * 255), round(b2 * 255))
+
+def is_screenshot_valid(path, white_threshold=0.90):
+    """Return True if the image looks like a real frame rather than a blank/corrupt capture.
+
+    Rejects images where more than *white_threshold* fraction of pixels are
+    near-white (>= 245 in all channels), which catches partially-written files
+    that render as a white canvas with only a sliver of real content.
+    Also rejects files that cv2 cannot decode at all.
+    """
+    try:
+        img = cv2.imread(path)
+        if img is None:
+            return False
+        near_white = np.all(img >= 245, axis=2)
+        if near_white.mean() >= white_threshold:
+            return False
+        return True
+    except Exception:
+        return False
+
 
 def create_optimized_screenshots(videoFile, runDir, skip_indices=None):
     logging.info("Making optimized screenshots...")
