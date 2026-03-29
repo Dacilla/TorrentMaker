@@ -336,6 +336,8 @@ class Movie(MediaFile):
         video_codec = self.get_video_codec(source)
         audio = self.get_audio_info()
         container = self.guessit_info.get('container', 'mkv')
+        if isinstance(container, list):
+            container = container[-1]
 
         rm4k_tag = "RM4K " if self.is_rm4k() else ""
         if huno_format:
@@ -404,6 +406,8 @@ class TVShow(MediaFile):
         video_codec = self.get_video_codec(source)
         audio = self.get_audio_info()
         container = self.guessit_info.get('container', 'mkv')
+        if isinstance(container, list):
+            container = container[-1]
 
         try:
             season = get_season(self.filename)
