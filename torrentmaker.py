@@ -181,6 +181,8 @@ def detect_source_from_filename(filename: str) -> str:
         base_source = 'BluRay'
     elif re.search(r'\bWEB[\.\-]DL\b|\bWEBDL\b', name):
         base_source = 'WEB-DL'
+    elif re.search(r'\bWEB\b', name):
+        base_source = 'WEB-DL'
     elif re.search(r'\bWEBRIP\b|\bWEB[\.\-]RIP\b', name):
         # DS4K ("DownScaled 4K") means the encode was made from a 4K source, downscaled to 1080p
         if re.search(r'\bDS4K\b', name):
@@ -993,6 +995,29 @@ def main():
 
         source_type_id = _resolve_source_type_id(source)
 
+        # --- Streaming service (WEB sources only) ---
+        streaming_service_val = None
+        if 'web' in source.lower():
+            # Extract service prefix from source string (e.g., "AMZN" from "AMZN WEB-DL")
+            for _wb in ('WEB-DL', 'WEBDL', 'WEBRIP', 'WEB-RIP', 'WEB'):
+                if source.upper().endswith(_wb):
+                    _prefix = source[:len(source) - len(_wb)].strip()
+                    if _prefix:
+                        streaming_service_val = _prefix
+                    break
+            if not streaming_service_val:
+                play_alert("input")
+                print(
+                    "\n  No streaming service detected. Providing one is optional but heavily recommended.\n"
+                    "  Common services: NF, AMZN, DSNP, ATVP, MAX, HULU, PCOK, HMAX, HBO, CR, STAN, CRAV ...\n"
+                    "  Press Enter to skip (will submit as 'NADA' — no streaming service)."
+                )
+                _svc_input = input("  Streaming service abbreviation: ").strip().upper()
+                streaming_service_val = _svc_input if _svc_input else "NADA"
+                logging.info(f"Streaming service set to: '{streaming_service_val}'")
+            else:
+                logging.info(f"Streaming service detected: '{streaming_service_val}'")
+
         audio_info = media_file.get_audio_info()
         # Split "DDP 5.1" → audio_format="DDP", audio_channels="5.1"
         audio_parts = audio_info.split(' ', 1)
@@ -1051,6 +1076,8 @@ def main():
         }
         if source_type_id is not None:
             data['source_type'] = source_type_id
+        if streaming_service_val:
+            data['streaming_service'] = streaming_service_val
         if edition:
             data['edition'] = edition
         if MAL_ID:
@@ -1086,6 +1113,7 @@ def main():
                 ('video_format', 'video_format_id'),
                 ('audio_format', 'audio_format_id'),
                 ('source_type', 'source_type_id'),
+                ('streaming_service', 'streaming_service_id'),
             ]:
                 if old_key in md:
                     md[new_key] = md.pop(old_key)
