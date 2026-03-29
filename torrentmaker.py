@@ -924,6 +924,8 @@ def main():
             ptpimg_api=ptpimg_api,
             catbox_hash=catbox_hash
         )
+        if bbcodes is None:
+            return
         if bbcodes:
             with open(os.path.join(runDir, "showDesc.txt"), "w", encoding='utf-8') as desc_file:
                 for bbcode in bbcodes:
@@ -1430,6 +1432,10 @@ def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbo
                 logging.error(f"Upload task failed for {image_paths[index]}: {e}")
     
     successful_uploads = [b for b in bbcodes if b]
+    if len(successful_uploads) < len(images):
+        failed = len(images) - len(successful_uploads)
+        logging.error(f"Failure: {failed} out of {len(images)} screenshots failed to upload. Aborting.")
+        return None
     logging.info(f"Success: Successfully uploaded {len(successful_uploads)} out of {len(images)} screenshots")
     return successful_uploads
 
