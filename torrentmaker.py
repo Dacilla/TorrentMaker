@@ -973,8 +973,8 @@ def main():
             sys.exit(1)
         type_id = _get_huno_type_id(source, videoCodec)
         # AV1 is used by both encode groups and streaming services natively (e.g. Netflix).
-        # Ask the user to clarify rather than assume, since we can't reliably tell from metadata alone.
-        if videoCodec == 'AV1' and type_id == _HUNO_TYPE_ENCODE:
+        # For WEB sources only, ask the user to clarify — non-WEB sources (BluRay etc.) are always encodes.
+        if videoCodec == 'AV1' and type_id == _HUNO_TYPE_ENCODE and 'web' in source.lower():
             play_alert("input")
             answer = input(
                 "AV1 detected — is this a direct WEB release or an encode?\n"
