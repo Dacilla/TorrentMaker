@@ -372,11 +372,11 @@ def _terminal_is_focused() -> bool:
 
 def play_alert(kind: str = "input"):
     """Play a system sound. kind='input' for prompts, 'done' for hashing complete.
-    Suppressed if called within 5 seconds of the last alert, or if the terminal is in focus."""
+    Suppressed if called within 10 seconds of the last alert, or if the terminal is in focus."""
     global _last_alert_time
     import time
     now = time.monotonic()
-    if now - _last_alert_time < 5.0:
+    if now - _last_alert_time < 10.0:
         return
     if _terminal_is_focused():
         return
