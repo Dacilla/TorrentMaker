@@ -353,13 +353,26 @@ def getInfoDump(filePath: str, runDir: str):
 
 _last_alert_time = 0.0
 
+def _terminal_is_focused() -> bool:
+    """Returns True if the console window associated with this process is the foreground window.
+    Note: unreliable under Windows Terminal, which uses a hidden conhost window."""
+    try:
+        hwnd_console = ctypes.windll.kernel32.GetConsoleWindow()
+        hwnd_foreground = ctypes.windll.user32.GetForegroundWindow()
+        return hwnd_console != 0 and hwnd_console == hwnd_foreground
+    except Exception:
+        return False
+
+
 def play_alert(kind: str = "input"):
     """Play a system sound. kind='input' for prompts, 'done' for hashing complete.
-    Suppressed if called within 5 seconds of the last alert."""
+    Suppressed if called within 5 seconds of the last alert, or if the terminal is in focus."""
     global _last_alert_time
     import time
     now = time.monotonic()
     if now - _last_alert_time < 5.0:
+        return
+    if _terminal_is_focused():
         return
     _last_alert_time = now
     try:
