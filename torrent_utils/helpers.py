@@ -12,6 +12,7 @@ import numpy as np
 import zipfile
 import platform
 import subprocess
+import winsound
 from base64 import b64encode
 from pprint import pformat
 
@@ -350,11 +351,31 @@ def getInfoDump(filePath: str, runDir: str):
     return output
 
 
+_last_alert_time = 0.0
+
+def play_alert(kind: str = "input"):
+    """Play a system sound. kind='input' for prompts, 'done' for hashing complete.
+    Suppressed if called within 5 seconds of the last alert."""
+    global _last_alert_time
+    import time
+    now = time.monotonic()
+    if now - _last_alert_time < 5.0:
+        return
+    _last_alert_time = now
+    try:
+        if kind == "done":
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        else:
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+    except Exception:
+        pass
+
+
 def getUserInput(question: str):
     question = question + " [y, n]"
     Userinput = None
     while Userinput not in ["y", "yes", "n", "no"]:
-        # notifyTaskbarIcon()
+        play_alert("input")
         Userinput = input(question)
         if Userinput in ["y", "yes"]:
             return True
@@ -394,6 +415,8 @@ def folders_in(path_to_parent):
 
 def cb(torrent, filepath, pieces_done, pieces_total):
     print(f'{pieces_done/pieces_total*100:3.0f} % done', end="\r")
+    if pieces_done == pieces_total:
+        play_alert("done")
 
 def uploadToPTPIMG(imageFile: str, api_key: str):
     """Uploads an image to PTPImg with robust error handling."""

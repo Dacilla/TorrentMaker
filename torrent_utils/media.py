@@ -10,7 +10,7 @@ from datetime import datetime
 from babel import Locale
 
 # These are still needed for now, but more logic will be moved from them.
-from .helpers import get_tmdb_id, get_season, get_episode
+from .helpers import get_tmdb_id, get_season, get_episode, play_alert
 
 
 def _prompt_tmdb_candidates(candidates: list, media_type: str) -> int | None:
@@ -24,6 +24,7 @@ def _prompt_tmdb_candidates(candidates: list, media_type: str) -> int | None:
             print(f"  {i}. {c['name']}{year_str}  [ID: {c['id']}]")
 
     print(f"  Enter a number to use a match, enter a TMDB ID directly, or press Enter to skip.")
+    play_alert("input")
     choice = input("> ").strip()
 
     if not choice:
@@ -127,6 +128,7 @@ class MediaFile:
             result = f"{height_str}{suffix}"
         else:
             logging.warning(f"Could not determine a standard resolution for detected dimensions {width}x{height}.")
+            play_alert("input")
             res_input = input(
                 f"Detected dimensions {width}x{height} do not match a known resolution. "
                 "Enter the resolution to use (e.g. 2160p, 1080p, 1080i, 720p, 576p, 480p): "
@@ -214,6 +216,7 @@ class MediaFile:
 
         if audio_format is None:
             logging.error(f"Could not determine audio format (raw format reported by MediaInfo: '{audio_track.get('Format')}').")
+            play_alert("input")
             audio_format = input(
                 "Could not detect audio format. Enter the audio format to use "
                 "(e.g. DDP, DD, TrueHD, DTS-HD MA, DTS, AAC, FLAC, PCM, MP3, OPUS): "
@@ -341,6 +344,7 @@ class Movie(MediaFile):
                 language = self.get_language_name()
             except ValueError as e:
                 logging.warning(f"Language detection failed: {e}")
+                play_alert("input")
                 language = input("Could not detect audio language. Enter the full English language name (e.g. 'English', 'Japanese'): ").strip()
                 if not language:
                     logging.error("No language provided. Cannot continue.")
@@ -409,6 +413,7 @@ class TVShow(MediaFile):
                 season = f"S{str(season_guess).zfill(2)}"
             else:
                 logging.warning(f"Could not determine season number from: {self.filename}")
+                play_alert("input")
                 season_input = input(
                     "Could not detect season number. Enter season in SXX format (e.g. S01, S02): "
                 ).strip().upper()
@@ -428,6 +433,7 @@ class TVShow(MediaFile):
                     episode = f"E{str(ep).zfill(2)}"
                 else:
                     logging.warning(f"Could not determine episode number from: {self.filename}")
+                    play_alert("input")
                     episode_input = input(
                         "Could not detect episode number. Enter episode in EXX format (e.g. E01, E02): "
                     ).strip().upper()
@@ -447,6 +453,7 @@ class TVShow(MediaFile):
                 language = self.get_language_name()
             except ValueError as e:
                 logging.warning(f"Language detection failed: {e}")
+                play_alert("input")
                 language = input("Could not detect audio language. Enter the full English language name (e.g. 'English', 'Japanese'): ").strip()
                 if not language:
                     logging.error("No language provided. Cannot continue.")

@@ -29,8 +29,9 @@ from tqdm import tqdm
 from concurrent import futures
 
 from torrent_utils.helpers import (
-    has_folders, cb, uploadToPTPIMG, copy_folder_structure, 
-    getUserInput, qbitInject, similarity, get_path_list, ensure_flac_cli
+    has_folders, cb, uploadToPTPIMG, copy_folder_structure,
+    getUserInput, qbitInject, similarity, get_path_list, ensure_flac_cli,
+    play_alert
 )
 from torrent_utils.config_loader import load_settings, validate_settings
 
@@ -369,6 +370,7 @@ def main():
             if not cover:
                 logging.error("Could not find or extract a cover image for this album.")
                 if getUserInput("A cover image is required for uploads. Do you want to provide a path to the cover image now?"):
+                    play_alert("input")
                     cover = input("Please enter the full path to the cover image:\n").strip().replace("\"", "")
                     if not os.path.exists(cover):
                         logging.error("The provided path does not exist. Exiting.")
@@ -583,6 +585,7 @@ def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, 
 
     if recordLabel:
         if len(recordLabel) < 2 or len(recordLabel) > 80:
+            play_alert("input")
             recordLabel = input("Gotten record label too long or too short for RED\nGotten label: " + recordLabel + "\nPlease input a record label:\n")
         if 'records dk' in recordLabel.lower() or artists_list[0].lower() == recordLabel.lower():
             recordLabel = 'Self-Released'
@@ -790,6 +793,7 @@ def get_release_year(path):
     if release_year is None:
         logging.error("No release year found in any file. Please check the metadata.")
         print_all_metadata_path(path) # Print metadata for debugging
+        play_alert("input")
         release_year = int(input("Please enter the 4-digit release year manually:\n"))
     return release_year
 
@@ -807,6 +811,7 @@ def get_genre(path):
         genre = genre.replace('Bandes originales de films', 'Stage and Screen')
     except (KeyError, NameError):
         logging.error("No genre found, please give genres comma separated")
+        play_alert("input")
         genre = input()
     return genre.lower()
 

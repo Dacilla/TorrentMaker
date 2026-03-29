@@ -31,9 +31,10 @@ from colorthief import ColorThief
 from torrent_utils.config_loader import load_settings, validate_settings
 from torrent_utils.HUNOInfo import bannedEncoders, encoderGroups
 from torrent_utils.helpers import (
-    getInfoDump, getUserInput, has_folders, cb, uploadToPTPIMG, 
-    copy_folder_structure, qbitInject, FileOrFolder, is_valid_torf_hash, 
-    convert_sha1_hash, ensure_mediainfo_cli, upload_to_catbox, upload_to_imgbb
+    getInfoDump, getUserInput, has_folders, cb, uploadToPTPIMG,
+    copy_folder_structure, qbitInject, FileOrFolder, is_valid_torf_hash,
+    convert_sha1_hash, ensure_mediainfo_cli, upload_to_catbox, upload_to_imgbb,
+    play_alert
 )
 from torrent_utils.media import Movie, TVShow
 
@@ -713,6 +714,7 @@ def main():
             group = re.sub(r"[\[\]\(\)\{\}]", " ", group).split()[0]
         else:
             logging.warning("Could not detect release group from filename.")
+            play_alert("input")
             group_input = input(
                 "Could not detect release group. Enter group name, or press Enter to use 'NOGRP': "
             ).strip()
@@ -733,6 +735,7 @@ def main():
             logging.info(f"Auto-detected source: '{source}'")
         else:
             logging.warning("Could not auto-detect source from filename.")
+            play_alert("input")
             _source_options = (
                 "UHD BluRay, UHD BluRay Hybrid, BluRay, BluRay Hybrid, "
                 "HD-DVD, HD-DVD Hybrid, DVD9, DVD5, DVD, "
