@@ -107,6 +107,11 @@ def _get_huno_type_id(source: str, video_codec: str) -> int:
 
 
 # Ordered by specificity (longer/more-specific phrases first to avoid partial matches)
+# Maps abbreviations/alternate spellings found in filenames to their canonical edition string
+_EDITION_ALIASES: dict[str, str] = {
+    "Anniv": "Anniversary",
+}
+
 _HUNO_EDITIONS = [
     "4K Remaster",
     "Directors Cut",
@@ -148,6 +153,11 @@ def detect_edition_from_path(path: str) -> str | None:
         if re.search(pattern, combined, re.IGNORECASE):
             # Normalise Director's Cut → Directors Cut
             return edition.replace("Director's Cut", "Directors Cut")
+    # Check abbreviation/alias list
+    for alias, canonical in _EDITION_ALIASES.items():
+        pattern = r'(?<![A-Za-z])' + re.escape(alias) + r'(?![A-Za-z])'
+        if re.search(pattern, combined, re.IGNORECASE):
+            return canonical
     return None
 
 
