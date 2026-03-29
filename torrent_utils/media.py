@@ -308,7 +308,8 @@ class Movie(MediaFile):
         if not self.tmdb_id:
             logging.info("Attempting to find TMDB ID for movie...")
             title_to_search = self.guessit_info.get('title', '')
-            self.tmdb_id, candidates = get_tmdb_id(title_to_search, self.tmdb_api_key, isMovie=True)
+            year_hint = self.guessit_info.get('year')
+            self.tmdb_id, candidates = get_tmdb_id(title_to_search, self.tmdb_api_key, isMovie=True, year=year_hint)
 
         if not self.tmdb_id:
             self.tmdb_id = _prompt_tmdb_candidates(candidates, 'movie')
@@ -378,7 +379,8 @@ class TVShow(MediaFile):
         if not self.tmdb_id:
             logging.info("Attempting to find TMDB ID for TV show...")
             title_to_search = self.guessit_info.get('title', '')
-            self.tmdb_id, candidates = get_tmdb_id(title_to_search, self.tmdb_api_key, isMovie=False)
+            year_hint = self.guessit_info.get('year')
+            self.tmdb_id, candidates = get_tmdb_id(title_to_search, self.tmdb_api_key, isMovie=False, year=year_hint)
 
         if not self.tmdb_id:
             self.tmdb_id = _prompt_tmdb_candidates(candidates, 'TV show')

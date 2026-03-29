@@ -265,10 +265,12 @@ def ensure_flac_cli():
         sys.exit(1)
 
 
-def get_tmdb_id(name, api_key, isMovie):
+def get_tmdb_id(name, api_key, isMovie, year=None):
     """
     Returns (tmdb_id, candidates) where tmdb_id is the confident match (or None)
     and candidates is a list of dicts with keys: id, name, year, similarity.
+    If year is provided, it is used as a tiebreaker: a high-similarity match whose
+    year does not match will not be auto-accepted and will fall through to prompting.
     """
     logging.info("Looking for title: " + name)
 
@@ -291,23 +293,27 @@ def get_tmdb_id(name, api_key, isMovie):
                     logging.info(f"Comparing {name} to {original_title}, ID {result.get('id')}")
                     titleSimilarity = max(similarity(name, original_title), similarity(name, title))
                     display_name = title or original_title
-                    year = (result.get('release_date') or '')[:4]
+                    result_year = (result.get('release_date') or '')[:4]
                 else:
                     show_name = result.get('name', '')
                     original_name = result.get('original_name', '')
                     logging.info(f"Comparing {name} to {show_name}, aka {original_name}, ID {result.get('id')}")
                     titleSimilarity = max(similarity(name, original_name), similarity(name, show_name))
                     display_name = show_name or original_name
-                    year = (result.get('first_air_date') or '')[:4]
+                    result_year = (result.get('first_air_date') or '')[:4]
 
                 logging.info("Similarity: " + str(titleSimilarity))
                 candidates.append({
                     'id': result.get('id'),
                     'name': display_name,
-                    'year': year,
+                    'year': result_year,
                     'similarity': titleSimilarity,
                 })
                 if titleSimilarity > 85:
+                    # If a year hint was provided, only auto-accept if it matches
+                    if year and result_year and str(year) != result_year:
+                        logging.info(f"High similarity but year mismatch: expected {year}, got {result_year} — skipping auto-accept")
+                        continue
                     return result.get('id'), candidates
             except (KeyError, TypeError):
                 continue
