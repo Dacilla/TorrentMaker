@@ -99,10 +99,10 @@ def _get_huno_type_id(source: str, video_codec: str) -> int:
     source_lower = source.lower() if source else ""
     if 'remux' in source_lower:
         return _HUNO_TYPE_REMUX
-    if 'web' in source_lower:
-        return _HUNO_TYPE_WEB
     if video_codec in ('x264', 'x265', 'AV1'):
         return _HUNO_TYPE_ENCODE
+    if 'web' in source_lower:
+        return _HUNO_TYPE_WEB
     return _HUNO_TYPE_WEB  # Safe fallback
 
 
@@ -182,7 +182,11 @@ def detect_source_from_filename(filename: str) -> str:
     elif re.search(r'\bWEB[\.\-]DL\b|\bWEBDL\b', name):
         base_source = 'WEB-DL'
     elif re.search(r'\bWEBRIP\b|\bWEB[\.\-]RIP\b', name):
-        base_source = 'WEBRip'
+        # DS4K ("DownScaled 4K") means the encode was made from a 4K source, downscaled to 1080p
+        if re.search(r'\bDS4K\b', name):
+            base_source = 'WEB-DL'
+        else:
+            base_source = 'WEBRip'
     elif re.search(r'\bHDTV\b', name):
         base_source = 'HDTV'
     elif re.search(r'\bSDTV\b', name):
@@ -318,6 +322,10 @@ def print_huno_payload_preview(data: dict, torrent_name: str, source: str):
         lines.append(f"  episode_number: {data.get('episode_number')}")
     if 'edition' in data:
         lines.append(f"  edition       : {data.get('edition')}")
+    if 'scaling_type' in data:
+        _scaling_names = {1: 'DS4K', 2: 'AIUS'}
+        st_val = data.get('scaling_type')
+        lines.append(f"  scaling_type  : {st_val} ({_scaling_names.get(st_val, '?')})")
     # manual-mode-only fields
     if is_manual:
         lines += [
@@ -799,6 +807,19 @@ def main():
         source = detect_source_from_filename(media_file.filename)
         if not source:
             source = detect_source_from_filename(os.path.basename(path))
+        # WEBRip + encode codec means the encoder's source was a WEB-DL; upgrade accordingly
+        if source.endswith('WEBRip'):
+            video_format = media_file.video_track.get('Format', '') if media_file.video_track else ''
+            folder_upper = os.path.basename(path).upper()
+            is_encode = (
+                'AV1' in video_format
+                or re.search(r'\bX265\b|\bX264\b', folder_upper)
+                or re.search(r'\bX265\b|\bX264\b', media_file.filename.upper())
+            )
+            if is_encode:
+                service = source[:-len('WEBRip')].strip()
+                source = f"{service} WEB-DL".strip() if service else 'WEB-DL'
+                logging.info(f"Upgraded WEBRip → WEB-DL (encode codec detected: {video_format or 'x265/x264'})")
         if source:
             logging.info(f"Auto-detected source: '{source}'")
         else:
@@ -1024,6 +1045,8 @@ def main():
             data['edition'] = edition
         if MAL_ID:
             data['mal'] = MAL_ID
+        if media_file.is_ds4k():
+            data['scaling_type'] = 1
 
         if not arg.movie:
             season_val = media_file.guessit_info.get("season", 0)

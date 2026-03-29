@@ -146,6 +146,10 @@ class MediaFile:
         """Detects if the release is a RM4K (remux upscale from 4K) release."""
         return bool(re.search(r'\brm4k\b', self.filename, re.IGNORECASE))
 
+    def is_ds4k(self) -> bool:
+        """Detects if the release is a DS4K (downscaled from 4K) release."""
+        return bool(re.search(r'\bds4k\b', self.filename, re.IGNORECASE))
+
     def get_video_codec(self, source: str) -> str:
         """Determines the video codec based on MediaInfo, filename and source."""
         if not self.video_track:
@@ -342,6 +346,7 @@ class Movie(MediaFile):
             container = container[-1]
 
         rm4k_tag = "RM4K " if self.is_rm4k() else ""
+        ds4k_tag = "DS4K " if self.is_ds4k() else ""
         if huno_format:
             colour_space = self.get_colour_space()
             try:
@@ -355,12 +360,12 @@ class Movie(MediaFile):
                     sys.exit(1)
             edition_part = f" {edition}" if edition else ""
             base_name = f"{title} ({year}){edition_part}"
-            details = f"{resolution} {rm4k_tag}{source} {video_codec} {colour_space} {audio} {language} - {group}"
+            details = f"{resolution} {ds4k_tag}{rm4k_tag}{source} {video_codec} {colour_space} {audio} {language} - {group}"
             filename = f"{base_name} ({details}).{container}"
         else:
             if video_codec == "H264": video_codec = "H.264"
             elif video_codec == "H265": video_codec = "H.265"
-            parts = [title, year, resolution, f"{rm4k_tag}{source}".strip(), audio.replace(' ', ''), video_codec]
+            parts = [title, year, resolution, f"{ds4k_tag}{rm4k_tag}{source}".strip(), audio.replace(' ', ''), video_codec]
             filename = '.'.join(filter(None, parts)) + f"-{group}.{container}"
             filename = filename.replace(' ', '.')
 
@@ -455,6 +460,7 @@ class TVShow(MediaFile):
                 episode_num += f" - {episode_title}"
 
         rm4k_tag = "RM4K " if self.is_rm4k() else ""
+        ds4k_tag = "DS4K " if self.is_ds4k() else ""
         if huno_format:
             colour_space = self.get_colour_space()
             try:
@@ -468,12 +474,12 @@ class TVShow(MediaFile):
                     sys.exit(1)
             edition_part = f" {edition}" if edition else ""
             base_name = f"{show_name} ({year}){edition_part} {episode_num}"
-            details = f"{resolution} {rm4k_tag}{source} {video_codec} {colour_space} {audio} {language} - {group}"
+            details = f"{resolution} {ds4k_tag}{rm4k_tag}{source} {video_codec} {colour_space} {audio} {language} - {group}"
             filename = f"{base_name} ({details}).{container}"
         else:
             if video_codec == "H264": video_codec = "H.264"
             elif video_codec == "H265": video_codec = "H.265"
-            parts = [show_name, year, episode_num, resolution, f"{rm4k_tag}{source}".strip(), audio.replace(' ', ''), video_codec]
+            parts = [show_name, year, episode_num, resolution, f"{ds4k_tag}{rm4k_tag}{source}".strip(), audio.replace(' ', ''), video_codec]
             filename = '.'.join(filter(None, parts)) + f"-{group}.{container}"
             filename = filename.replace(' ', '.')
 
