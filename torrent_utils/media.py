@@ -159,6 +159,7 @@ class MediaFile:
             return 'AV1'
         if 'HEVC' in video_format:
             if 'remux' in source_lower: return 'HEVC'
+            if 'x265' in file_lower: return 'x265'
             if 'h265' in file_lower or 'hevc' in file_lower: return 'H265'
             return "x265"
         if "VC-1" in video_format: return "VC-1"
