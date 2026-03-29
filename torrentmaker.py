@@ -775,6 +775,8 @@ def main():
         if detected_group:
             group = detected_group[0] if isinstance(detected_group, list) else detected_group
             group = re.sub(r"[\[\]\(\)\{\}]", " ", group).split()[0]
+            if '-' in group:
+                group = group.rsplit('-', 1)[-1]
         else:
             logging.warning("Could not detect release group from filename.")
             play_alert("input")
