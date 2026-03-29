@@ -1135,7 +1135,14 @@ def create_optimized_screenshots(videoFile, runDir):
     if not os.path.isdir(screenshots_dir):
         os.mkdir(screenshots_dir)
 
+    # Suppress ffmpeg/libav stderr (e.g. "Unsupported encoding type") that leaks through OpenCV
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved_stderr = os.dup(2)
+    os.dup2(devnull, 2)
+    os.close(devnull)
     video = cv2.VideoCapture(videoFile)
+    os.dup2(saved_stderr, 2)
+    os.close(saved_stderr)
     if not video.isOpened():
         logging.error(f"Could not open video file: {videoFile}")
         return False
