@@ -972,6 +972,16 @@ def main():
             logging.error(e)
             sys.exit(1)
         type_id = _get_huno_type_id(source, videoCodec)
+        # AV1 is used by both encode groups and streaming services natively (e.g. Netflix).
+        # Ask the user to clarify rather than assume, since we can't reliably tell from metadata alone.
+        if videoCodec == 'AV1' and type_id == _HUNO_TYPE_ENCODE:
+            play_alert("input")
+            answer = input(
+                "AV1 detected — is this a direct WEB release or an encode?\n"
+                "  1) Encode  2) Direct WEB\n> "
+            ).strip()
+            if answer == '2':
+                type_id = _HUNO_TYPE_WEB
         if resolution not in RESOLUTION_ID_MAP:
             accepted = ", ".join(sorted(RESOLUTION_ID_MAP.keys()))
             logging.error(
