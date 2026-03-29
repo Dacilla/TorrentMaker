@@ -824,6 +824,7 @@ def main():
         torrent = torf.Torrent()
         torrent.private = True
         torrent.source = "HUNO"
+        torrent.piece_size_max = 4 * 1024 * 1024  # 4MB max — prevents Windows [Errno 22] on large reads
         torrent.path = path
         torrent.trackers.append(huno_announce_url)
 
