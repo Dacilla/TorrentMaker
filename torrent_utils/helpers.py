@@ -325,15 +325,16 @@ def get_tmdb_id(name, api_key, isMovie, year=None):
         return None, []
 
 
-def getInfoDump(filePath: str, runDir: str):
+def getInfoDump(filePath: str, runDir: str, filename: str = DUMPFILE):
     output = MediaInfo.parse(filename=filePath, output="", full=False)
     logging.debug(output)
     # don't ask, the output looks fine in the terminal, but writing it
     # to a file adds empty lines every second line. This deletes them
-    logging.info("Creating mediainfo dump at " + os.path.join(runDir, DUMPFILE))
-    with open(os.path.join(runDir, DUMPFILE), "w", encoding='utf-8') as f:
+    output_path = os.path.join(runDir, filename)
+    logging.info("Creating mediainfo dump at " + output_path)
+    with open(output_path, "w", encoding='utf-8') as f:
         f.write(output)
-    with open(os.path.join(runDir, DUMPFILE), "r", encoding='utf-8') as fi:
+    with open(output_path, "r", encoding='utf-8') as fi:
         # Get the lines from the file
         lines = fi.readlines()
 
@@ -348,7 +349,7 @@ def getInfoDump(filePath: str, runDir: str):
                 new_lines.append(line)
 
     # Open the file in write mode
-    with open(os.path.join(runDir, DUMPFILE), 'w', encoding='utf-8') as fo:
+    with open(output_path, 'w', encoding='utf-8') as fo:
         # Write the modified lines to the file
         for line in new_lines:
             fo.write(line)

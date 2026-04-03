@@ -44,11 +44,13 @@ LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-1
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # TODO: Improve detection of AV1 WEB Encodes
+# TODO: Add support for OnlyImage (https://onlyimage.org/api/1/upload) using setting 'onlyimage_api', have it come next after ptpimg. Uses Chevereto, documentation at https://v4-docs.chevereto.com/api/1/file-upload.html#request-method
+# TODO: Sound alert when screenshot uploading fails
 # TODO: Check qbit for existing torrent for given path to skip hash calculation
 # TODO: Automatically detect TV vs movie to make -m argument unnecessary
 # TODO: When featurettes are included, add their inclusion as an automatic note in the description
 # TODO: Add argument for personal releases to add a note like 'Please don't upload elsewhere without asking, thanks!'
-# TODO: Filter HUNO dupes by same codec, resolution, and season number (for TV) to better identify true duplicates
+# TODO: Filter HUNO dupes check by same codec, resolution, and season number (for TV) to better identify true duplicates
 # TODO: Support bulk paths input to upload multiple season packs sequentially
 
 # Maps --source argument (case-insensitive) to HUNO source_type IDs
@@ -276,7 +278,7 @@ _HUNO_SOURCE_TYPE_NAMES = {
 _HUNO_AUDIO_CHANNEL_NAMES = {v: k for k, v in AUDIO_CHANNEL_ID_MAP.items()}
 
 
-def print_huno_payload_preview(data: dict, torrent_name: str, source: str):
+def print_huno_payload_preview(data: dict, torrent_name: str, source: str, include_source_mediainfo: bool = False):
     """Prints a human-readable preview of the HUNO upload payload."""
     is_manual = data.get('mode') == 'manual'
     header = "  HUNO UPLOAD PAYLOAD PREVIEW (MANUAL MODE)" if is_manual else "  HUNO UPLOAD PAYLOAD PREVIEW"
@@ -287,6 +289,10 @@ def print_huno_payload_preview(data: dict, torrent_name: str, source: str):
         "=" * 62,
         f"  Torrent name  : {torrent_name}",
         f"  Source string : {source or '(not set)'}",
+    ]
+    if include_source_mediainfo:
+        lines.append(f"  Source file   : (included)")
+    lines += [
         "-" * 62,
         f"  category_id   : {data.get('category_id')} ({_HUNO_CATEGORY_NAMES.get(data.get('category_id'), '?')})",
         f"  type_id       : {data.get('type_id')} ({_HUNO_TYPE_NAMES.get(data.get('type_id'), '?')})",
@@ -611,6 +617,13 @@ def main():
         default=None
     )
     parser.add_argument(
+        "--source-file",
+        action="store",
+        type=str,
+        help="Path to source file/folder for encode uploads (validates release is an encode)",
+        default=None
+    )
+    parser.add_argument(
         "-D", "--debug", action="store_true", help="debug mode", default=False
     )
     parser.add_argument(
@@ -849,6 +862,67 @@ def main():
                 sys.exit(1)
     if source.lower() == 'blu-ray': source = 'BluRay'
 
+    # --- Source File Validation and Processing ---
+    source_file_path = None
+    if arg.source_file:
+        # Validate that source file is only used with ENCODE releases
+        source_lower = source.lower()
+        if not any(x in source_lower for x in ['encode', 'x265', 'x264', 'av1']):
+            logging.error(f"Source file can only be provided for ENCODE releases. Current source: {source}")
+            sys.exit(1)
+
+        # Resolve source file/folder path
+        source_file_arg = arg.source_file
+        if not os.path.exists(source_file_arg):
+            logging.error(f"Source file/folder does not exist: {source_file_arg}")
+            sys.exit(1)
+
+        # If source is a folder and we're processing a season pack, find matching episode
+        if os.path.isdir(source_file_arg):
+            if is_season_pack:
+                # Extract episode number from the main media file
+                main_episode = media_file.guessit_info.get("episode")
+                if main_episode is None:
+                    logging.error("Cannot determine episode number from main file for season pack source matching")
+                    sys.exit(1)
+
+                # Find corresponding episode file in source folder
+                source_files = sorted([f for f in os.listdir(source_file_arg)
+                                      if os.path.isfile(os.path.join(source_file_arg, f))
+                                      and f.lower().endswith(('.mkv', '.mp4', '.avi', '.ts', '.m2ts'))])
+
+                matching_source_file = None
+                for src_file in source_files:
+                    src_guessit = guessit.guessit(src_file)
+                    if src_guessit.get("episode") == main_episode:
+                        matching_source_file = os.path.join(source_file_arg, src_file)
+                        break
+
+                if not matching_source_file:
+                    logging.error(f"Could not find matching episode {main_episode} in source folder: {source_file_arg}")
+                    sys.exit(1)
+
+                source_file_path = matching_source_file
+                logging.info(f"Found matching source episode {main_episode}: {os.path.basename(matching_source_file)}")
+            else:
+                # For single files/episodes, use largest video file in source folder
+                video_files = [f for f in os.listdir(source_file_arg)
+                              if os.path.isfile(os.path.join(source_file_arg, f))
+                              and f.lower().endswith(('.mkv', '.mp4', '.avi', '.ts', '.m2ts'))]
+
+                if not video_files:
+                    logging.error(f"No video files found in source folder: {source_file_arg}")
+                    sys.exit(1)
+
+                source_file_path = os.path.join(source_file_arg,
+                                               max(video_files,
+                                                   key=lambda f: os.path.getsize(os.path.join(source_file_arg, f))))
+                logging.info(f"Using largest video file from source folder: {os.path.basename(source_file_path)}")
+        else:
+            # Source is a file
+            source_file_path = source_file_arg
+            logging.info(f"Using source file: {os.path.basename(source_file_path)}")
+
     edition = arg.edition
     if not edition:
         edition = detect_edition_from_path(path)
@@ -870,8 +944,17 @@ def main():
     torrentFileName += ".torrent"
     logging.info("Final name: " + torrentFileName)
 
-    # --- Create mediainfo dump ---
+    # --- Create mediainfo dumps ---
     _prev_mi = os.path.join(prev_run, "mediainfo.txt") if prev_run else None
+    source_mediainfo_path = None
+
+    # Extract source mediainfo first (if provided)
+    if source_file_path:
+        getInfoDump(source_file_path, runDir, filename="source_mediainfo.txt")
+        source_mediainfo_path = os.path.join(runDir, "source_mediainfo.txt")
+        logging.info(f"Source mediainfo extracted: {source_mediainfo_path}")
+
+    # Create main mediainfo dump
     if reusing and _prev_mi and os.path.exists(_prev_mi):
         shutil.copy2(_prev_mi, os.path.join(runDir, "mediainfo.txt"))
         logging.info("Reusing mediainfo from previous run.")
@@ -1134,16 +1217,26 @@ def main():
         def _do_manual_upload(manual_data=None):
             if manual_data is None:
                 manual_data = _build_manual_data()
-            print_huno_payload_preview(manual_data, torrentFileName, source)
+            print_huno_payload_preview(manual_data, torrentFileName, source, include_source_mediainfo=bool(source_mediainfo_path))
             if getUserInput("Do you want to upload this to HUNO?"):
-                with open(desc_path, 'rb') as desc_f, \
-                     open(mediainfo_path, 'rb') as mi_f, \
-                     open(torrent_path, 'rb') as torrent_f:
+                files_to_open = [
+                    ('desc', desc_path, 'application/json'),
+                    ('mediainfo', mediainfo_path, 'text/plain'),
+                    ('torrent', torrent_path, 'application/x-bittorrent'),
+                ]
+                if source_mediainfo_path and os.path.exists(source_mediainfo_path):
+                    files_to_open.append(('source_mediainfo', source_mediainfo_path, 'text/plain'))
+
+                open_files = [open(p, 'rb') for _, p, _ in files_to_open]
+                try:
                     files = {
-                        'torrent': (torrentFileName, torrent_f, 'application/x-bittorrent'),
-                        'description': ('description.txt', desc_f, 'text/plain'),
-                        'mediainfo': ('mediainfo.txt', mi_f, 'text/plain'),
+                        'torrent': (torrentFileName, open_files[2], 'application/x-bittorrent'),
+                        'description': ('description.txt', open_files[0], 'text/plain'),
+                        'mediainfo': ('mediainfo.txt', open_files[1], 'text/plain'),
                     }
+                    if len(open_files) > 3:
+                        files['source_mediainfo'] = ('source_mediainfo.txt', open_files[3], 'text/plain')
+
                     resp = requests.post(
                         url=HUNO_API_URL,
                         headers=headers,
@@ -1151,6 +1244,9 @@ def main():
                         files=files,
                         timeout=60,
                     )
+                finally:
+                    for f in open_files:
+                        f.close()
                 if resp.status_code == 422:
                     res = resp.json()
                     logging.error(f"HUNO manual upload rejected: {res.get('message')}")
@@ -1175,7 +1271,7 @@ def main():
 
         manual_data = _build_manual_data() if arg.manual else None
         if not arg.manual:
-            print_huno_payload_preview(data, torrentFileName, source)
+            print_huno_payload_preview(data, torrentFileName, source, include_source_mediainfo=bool(source_mediainfo_path))
 
         logging.info("Checking HUNO for existing releases...")
         dupes = search_huno_dupes(int(media_file.tmdb_id), 1 if arg.movie else 2, huno_api)
@@ -1189,14 +1285,24 @@ def main():
             upload_succeeded = _do_manual_upload(manual_data)
         elif arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
             try:
-                with open(desc_path, 'rb') as desc_f, \
-                     open(mediainfo_path, 'rb') as mi_f, \
-                     open(torrent_path, 'rb') as torrent_f:
+                files_to_open = [
+                    ('desc', desc_path, 'text/plain'),
+                    ('mediainfo', mediainfo_path, 'text/plain'),
+                    ('torrent', torrent_path, 'application/x-bittorrent'),
+                ]
+                if source_mediainfo_path and os.path.exists(source_mediainfo_path):
+                    files_to_open.append(('source_mediainfo', source_mediainfo_path, 'text/plain'))
+
+                open_files = [open(p, 'rb') for _, p, _ in files_to_open]
+                try:
                     files = {
-                        'torrent': (torrentFileName, torrent_f, 'application/x-bittorrent'),
-                        'description': ('description.txt', desc_f, 'text/plain'),
-                        'mediainfo': ('mediainfo.txt', mi_f, 'text/plain'),
+                        'torrent': (torrentFileName, open_files[2], 'application/x-bittorrent'),
+                        'description': ('description.txt', open_files[0], 'text/plain'),
+                        'mediainfo': ('mediainfo.txt', open_files[1], 'text/plain'),
                     }
+                    if len(open_files) > 3:
+                        files['source_mediainfo'] = ('source_mediainfo.txt', open_files[3], 'text/plain')
+
                     response = requests.post(
                         url=HUNO_API_URL,
                         headers=headers,
@@ -1204,6 +1310,9 @@ def main():
                         files=files,
                         timeout=60,
                     )
+                finally:
+                    for f in open_files:
+                        f.close()
                 if response.status_code == 409:
                     result = response.json()
                     logging.warning(f"HUNO upload rejected — duplicate content: {result.get('message')}")
