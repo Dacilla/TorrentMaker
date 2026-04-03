@@ -443,7 +443,7 @@ def uploadToPTPIMG(imageFile: str, api_key: str):
     try:
         with open(imageFile, 'rb') as f:
             file_payload = {"file-upload[0]": f.read()}
-        
+
         response = requests.post(
             url="https://ptpimg.me/upload.php",
             data={"api_key": api_key},
@@ -451,15 +451,41 @@ def uploadToPTPIMG(imageFile: str, api_key: str):
             timeout=30,
         )
         response.raise_for_status()
-        
+
         response_data = response.json()
         return f"https://ptpimg.me/{response_data[0]['code']}.{response_data[0]['ext']}"
-        
+
     except requests.exceptions.RequestException as e:
         logging.error(f"PTPImg upload failed for {os.path.basename(imageFile)}: {e}")
         return None
     except (json.JSONDecodeError, IndexError, KeyError) as e:
         logging.error(f"PTPImg returned invalid data for {os.path.basename(imageFile)}: {e}")
+        return None
+
+def upload_to_onlyimage(file_path: str, api_key: str):
+    """Uploads an image to OnlyImage (Chevereto) with robust error handling."""
+    api_endpoint = "https://onlyimage.org/api/1/upload"
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'source': (os.path.basename(file_path), f)}
+            data = {'key': api_key}
+            response = requests.post(api_endpoint, data=data, files=files, timeout=30)
+        response.raise_for_status()
+
+        response_data = response.json()
+        if response_data.get('status_code') == 200:
+            image_url = response_data['image']['url']
+            return image_url
+        else:
+            error_msg = response_data.get('error', {}).get('message', 'Unknown error')
+            logging.error(f"OnlyImage upload failed for {os.path.basename(file_path)}: {error_msg}")
+            return None
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"OnlyImage upload failed for {os.path.basename(file_path)}: {e}")
+        return None
+    except (json.JSONDecodeError, KeyError) as e:
+        logging.error(f"OnlyImage returned invalid data for {os.path.basename(file_path)}: {e}")
         return None
 
 def copy_folder_structure(src_path, dst_path):

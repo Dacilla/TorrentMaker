@@ -34,7 +34,7 @@ from torrent_utils.helpers import (
     getInfoDump, getUserInput, has_folders, cb, uploadToPTPIMG,
     copy_folder_structure, qbitInject, FileOrFolder, is_valid_torf_hash,
     convert_sha1_hash, ensure_mediainfo_cli, upload_to_catbox, upload_to_imgbb,
-    play_alert
+    upload_to_onlyimage, play_alert
 )
 from torrent_utils.media import Movie, TVShow
 
@@ -44,7 +44,6 @@ LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-1
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # TODO: Improve detection of AV1 WEB Encodes
-# TODO: Add support for OnlyImage (https://onlyimage.org/api/1/upload) using setting 'onlyimage_api', have it come next after ptpimg. Uses Chevereto, documentation at https://v4-docs.chevereto.com/api/1/file-upload.html#request-method
 # TODO: Sound alert when screenshot uploading fails
 # TODO: Check qbit for existing torrent for given path to skip hash calculation
 # TODO: Automatically detect TV vs movie to make -m argument unnecessary
@@ -664,10 +663,12 @@ def main():
     qbit_password = settings.get('QBIT_PASSWORD')
     qbit_host = settings.get('QBIT_HOST')
     ptpimg_api = settings.get('PTPIMG_API')
+    onlyimage_api = settings.get('ONLYIMAGE_API')
     catbox_hash = settings.get('CATBOX_HASH')
     seeding_dir = settings.get('SEEDING_DIR')
-    
+
     if ptpimg_api == '': ptpimg_api = None
+    if onlyimage_api == '': onlyimage_api = None
     if catbox_hash == '': catbox_hash = None
     # --- END Settings Section ---
 
@@ -1013,7 +1014,8 @@ def main():
             screenshot_dir=os.path.join(runDir, "screenshots"),
             imgbb_api=imgbb_api,
             ptpimg_api=ptpimg_api,
-            catbox_hash=catbox_hash
+            catbox_hash=catbox_hash,
+            onlyimage_api=onlyimage_api
         )
         if bbcodes is None:
             return
@@ -1500,7 +1502,7 @@ def optimize_screenshot(input_path, output_path, max_width=1920, quality=85):
         logging.error(f"Failed to optimize screenshot {input_path}: {e}")
         shutil.copy(input_path, output_path)
 
-def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash):
+def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api=None):
     image_name = os.path.basename(image_path)
     logging.info(f"Uploading {image_name}...")
 
@@ -1510,15 +1512,22 @@ def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash):
         if image_url:
             logging.info(f"Success: Successfully uploaded {image_name} to PTPImg.")
             return f"[url={image_url}][img]{image_url}[/img][/url]"
-    
-    # --- Attempt 2: ImgBB (if API key is provided) ---
+
+    # --- Attempt 2: OnlyImage (if API key is provided) ---
+    if onlyimage_api:
+        image_url = upload_to_onlyimage(image_path, onlyimage_api)
+        if image_url:
+            logging.info(f"Success: Successfully uploaded {image_name} to OnlyImage.")
+            return f"[url={image_url}][img]{image_url}[/img][/url]"
+
+    # --- Attempt 3: ImgBB (if API key is provided) ---
     if imgbb_api:
         image_url, _ = upload_to_imgbb(image_path, imgbb_api) # We only need the direct URL
         if image_url:
             logging.info(f"Success: Successfully uploaded {image_name} to ImgBB.")
             return f"[url={image_url}][img]{image_url}[/img][/url]"
 
-    # --- Attempt 3: Catbox (fallback) ---
+    # --- Attempt 4: Catbox (fallback) ---
     image_url = upload_to_catbox(image_path, catbox_hash)
     if image_url:
         logging.info(f"Success: Successfully uploaded {image_name} to Catbox.")
@@ -1527,18 +1536,18 @@ def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash):
     logging.error(f"Failure: All upload methods failed for {image_name}.")
     return None
 
-def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbox_hash, max_workers=5):
+def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api=None, max_workers=5):
     images = sorted([f for f in os.listdir(screenshot_dir)
                      if f.startswith('screenshot_') and f.lower().endswith('.png')])
     if not images:
         logging.warning("No screenshots found to upload!")
         return []
-    
+
     image_paths = [os.path.join(screenshot_dir, img) for img in images]
     bbcodes = [None] * len(images)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_index = {executor.submit(upload_single_screenshot, path, imgbb_api, ptpimg_api, catbox_hash): i for i, path in enumerate(image_paths)}
+        future_to_index = {executor.submit(upload_single_screenshot, path, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api): i for i, path in enumerate(image_paths)}
         for future in as_completed(future_to_index):
             index = future_to_index[future]
             try:

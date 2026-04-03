@@ -240,3 +240,60 @@ class TestUploadToCatbox:
         mock_resp.text = "error: file too large"
         with patch("torrent_utils.helpers.requests.post", return_value=mock_resp):
             assert upload_to_catbox(str(img)) is None
+
+
+# ---------------------------------------------------------------------------
+# upload_to_onlyimage
+# ---------------------------------------------------------------------------
+
+class TestUploadToOnlyimage:
+    def test_success(self, tmp_path):
+        from torrent_utils.helpers import upload_to_onlyimage
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "status_code": 200,
+            "image": {"url": "https://onlyimage.org/image/abc123.png"}
+        }
+        with patch("torrent_utils.helpers.requests.post", return_value=mock_resp):
+            url = upload_to_onlyimage(str(img), "apikey")
+        assert url == "https://onlyimage.org/image/abc123.png"
+
+    def test_http_error_returns_none(self, tmp_path):
+        from torrent_utils.helpers import upload_to_onlyimage
+        import requests as req
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = req.exceptions.HTTPError("401")
+        with patch("torrent_utils.helpers.requests.post", return_value=mock_resp):
+            url = upload_to_onlyimage(str(img), "badkey")
+        assert url is None
+
+    def test_bad_status_code_returns_none(self, tmp_path):
+        from torrent_utils.helpers import upload_to_onlyimage
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "status_code": 400,
+            "error": {"message": "Invalid API key"}
+        }
+        with patch("torrent_utils.helpers.requests.post", return_value=mock_resp):
+            url = upload_to_onlyimage(str(img), "badkey")
+        assert url is None
+
+    def test_bad_json_returns_none(self, tmp_path):
+        from torrent_utils.helpers import upload_to_onlyimage
+        import json
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.side_effect = json.JSONDecodeError("msg", "doc", 0)
+        with patch("torrent_utils.helpers.requests.post", return_value=mock_resp):
+            url = upload_to_onlyimage(str(img), "key")
+        assert url is None

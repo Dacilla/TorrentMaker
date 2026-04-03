@@ -15,6 +15,7 @@ CONFIG_STRUCTURE = {
         'TMDB_API': '',
         'IMGBB_API': '',
         'PTPIMG_API': '',
+        'ONLYIMAGE_API': '',
         'CATBOX_HASH': '',
         '# Tracker APIs': '',
         'HUNO_API': '',
