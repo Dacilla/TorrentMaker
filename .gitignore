@@ -139,3 +139,4 @@ runs
 *.ini
 *.xml
 .claude
+*tmp*

@@ -34,7 +34,7 @@ from torrent_utils.helpers import (
     getInfoDump, getUserInput, has_folders, cb, uploadToPTPIMG,
     copy_folder_structure, qbitInject, FileOrFolder, is_valid_torf_hash,
     convert_sha1_hash, ensure_mediainfo_cli, upload_to_catbox, upload_to_imgbb,
-    upload_to_onlyimage, play_alert
+    upload_to_onlyimage, play_alert, upload_to_slowpics
 )
 from torrent_utils.media import Movie, TVShow
 
@@ -52,6 +52,7 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 # TODO: Filter HUNO dupes check by same codec, resolution, and season number (for TV) to better identify true duplicates
 # TODO: Support bulk paths input to upload multiple season packs sequentially
 # TODO: Add personal release flag to add a note like 'Please don't upload elsewhere without asking, thanks!' and/or a custom note field for this
+# TODO: Find a more reliable alternative to slow.pics for screenshot comparison
 
 # Maps --source argument (case-insensitive) to HUNO source_type IDs
 SOURCE_TYPE_MAP = {
@@ -692,11 +693,15 @@ def main():
     ptpimg_api = settings.get('PTPIMG_API')
     onlyimage_api = settings.get('ONLYIMAGE_API')
     catbox_hash = settings.get('CATBOX_HASH')
+    slowpics_remember_me = settings.get('SLOWPICS_REMEMBER_ME')
+    slowpics_session = settings.get('SLOWPICS_SESSION')
     seeding_dir = settings.get('SEEDING_DIR')
 
     if ptpimg_api == '': ptpimg_api = None
     if onlyimage_api == '': onlyimage_api = None
     if catbox_hash == '': catbox_hash = None
+    if slowpics_remember_me == '': slowpics_remember_me = None
+    if slowpics_session == '': slowpics_session = None
     # --- END Settings Section ---
 
     if not arg.skipMICheck:
@@ -993,6 +998,12 @@ def main():
 
     # --- Screenshot and Upload Logic ---
     screenshot_success = False
+    encode_timestamps = []
+    encode_bbcodes = None
+    source_bbcodes = None
+    comparison_url = None
+    comparison_bbcodes = None
+
     if reusing and has_screenshots:
         prev_ss_src = os.path.join(prev_run, "screenshots")
         screenshots_dir = os.path.join(runDir, "screenshots")
@@ -1017,16 +1028,23 @@ def main():
                 f"Generating {len(missing)} missing screenshot(s) "
                 f"(indices: {', '.join(str(i) for i in missing)})."
             )
-            screenshot_success = create_optimized_screenshots(videoFile, runDir, skip_indices=existing_indices)
+            screenshot_success, encode_timestamps = create_optimized_screenshots(videoFile, runDir, skip_indices=existing_indices)
             if not screenshot_success:
                 logging.error("Failed to generate missing screenshots. Aborting.")
                 sys.exit(1)
         else:
             logging.info(f"Reusing all 8 screenshots from {os.path.relpath(prev_run)}.")
             screenshot_success = True
+            # Recompute timestamps from video file for source screenshot capture if needed
+            if source_file_path:
+                _v = cv2.VideoCapture(videoFile)
+                if _v.isOpened():
+                    _dur = int(_v.get(cv2.CAP_PROP_FRAME_COUNT)) / int(_v.get(cv2.CAP_PROP_FPS))
+                    encode_timestamps = [i * _dur / 10 for i in range(1, 9)]
+                _v.release()
     else:
         logging.info("Making screenshots...")
-        screenshot_success = create_optimized_screenshots(videoFile, runDir)
+        screenshot_success, encode_timestamps = create_optimized_screenshots(videoFile, runDir)
         if not screenshot_success:
             logging.error("Failed to create screenshots. Aborting.")
             sys.exit(1)
@@ -1053,6 +1071,61 @@ def main():
                 for bbcode in bbcodes:
                     desc_file.write(f"[center]{bbcode}[/center]\n")
             logging.info(f"Success: BBCode written to showDesc.txt ({len(bbcodes)} images)")
+
+    # --- Comparison Screenshots (source_file_path only) ---
+    if bbcodes:
+        encode_bbcodes = bbcodes
+
+    if source_file_path and screenshot_success and encode_timestamps:
+        source_ok = capture_source_screenshots(source_file_path, encode_timestamps, runDir)
+        if source_ok and arg.upload:
+            source_bbcodes = upload_screenshots_concurrently(
+                screenshot_dir=os.path.join(runDir, "screenshots"),
+                imgbb_api=imgbb_api,
+                ptpimg_api=ptpimg_api,
+                catbox_hash=catbox_hash,
+                onlyimage_api=onlyimage_api,
+                file_pattern="source_"
+            )
+            if source_bbcodes and encode_bbcodes:
+                # Interleave: src_00, enc_00, src_01, enc_01...
+                comparison_bbcodes = [val for pair in zip(source_bbcodes, encode_bbcodes) for val in pair]
+
+                # Build image_pairs for slow.pics: [(source_path, encode_path), ...]
+                ss_dir = os.path.join(runDir, "screenshots")
+                image_pairs = [
+                    (os.path.join(ss_dir, f"source_{i:02d}.png"),
+                     os.path.join(ss_dir, f"screenshot_{i:02d}.png"))
+                    for i in range(8)
+                ]
+                colour_space = media_file.get_colour_space()  # "SDR", "HDR", etc.
+                slowpics_result = upload_to_slowpics(
+                    image_pairs,
+                    collection_name=os.path.splitext(torrentFileName)[0],
+                    labels=["Source", "Encode"],
+                    hdr_type=colour_space,
+                    remember_me=slowpics_remember_me,
+                    session_cookie=slowpics_session,
+                    return_status=True,
+                )
+                comparison_url = slowpics_result.get("url")
+                if comparison_url:
+                    logging.info(f"slow.pics comparison: {comparison_url}")
+                else:
+                    error_code = slowpics_result.get("error_code")
+                    error_message = slowpics_result.get("error_message")
+                    if error_code:
+                        logging.warning(
+                            "slow.pics upload failed (%s: %s) — description will include inline frames only.",
+                            error_code,
+                            error_message,
+                        )
+                    else:
+                        logging.warning("slow.pics upload failed — description will include inline frames only.")
+        elif source_ok and not arg.upload:
+            logging.info("Source screenshots captured but --upload not set; skipping comparison upload.")
+        else:
+            logging.warning("Source screenshot capture failed — skipping comparison section.")
 
     # --- Create Torrent File ---
     postName = os.path.splitext(torrentFileName)[0]
@@ -1179,7 +1252,8 @@ def main():
             else:
                 logging.debug("Not detected as anime — skipping MAL lookup.")
 
-        generate_bbcode(media_file.tmdb_id, media_file.metadata.get('overview', ''), runDir, tmdb_api, arg.movie, arg.notes)
+        generate_bbcode(media_file.tmdb_id, media_file.metadata.get('overview', ''), runDir, tmdb_api, arg.movie, arg.notes,
+                        comparison_url=comparison_url, comparison_bbcodes=comparison_bbcodes)
 
         is_season_pack = 1 if (not arg.movie and not arg.episode and isFolder == 2) else 0
 
@@ -1384,7 +1458,7 @@ def main():
         paused = not arg.huno
         qbitInject(qbit_host=qbit_host, qbit_username=qbit_username, qbit_password=qbit_password, category=category, runDir=runDir, torrentFileName=torrentFileName, paused=paused, postName=postName)
 
-def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, isMovie, notes=None):
+def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, isMovie, notes=None, comparison_url=None, comparison_bbcodes=None):
     prominent_color = get_prominent_color(tmdb_id, api_key, runDir, isMovie)
     hex_color = f"#{prominent_color[0]:02x}{prominent_color[1]:02x}{prominent_color[2]:02x}"
     bbcode = f'[color={hex_color}][center][b]Description[/b][/center][/color]\n' \
@@ -1392,6 +1466,17 @@ def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, isMovie, notes=None):
     if notes:
         bbcode += f'[color={hex_color}][center][b]Notes[/b][/center][/color]\n' \
                   f'[center]{notes}[/center]\n\n'
+
+    if comparison_bbcodes:
+        bbcode += f'[color={hex_color}][center][b]Comparison[/b][/center][/color]\n'
+        if comparison_url:
+            bbcode += f'[center][url={comparison_url}]View on slow.pics[/url][/center]\n'
+        bbcode += '\n'
+        bbcode += f'[color={hex_color}][center][b]Source vs Encode[/b][/center][/color]\n'
+        for cb_item in comparison_bbcodes:
+            bbcode += f'[center]{cb_item}[/center]\n'
+        bbcode += '\n'
+
     bbcode += f'[color={hex_color}][center][b]Screens[/b][/center][/color]\n'
     
     desc_file_path = os.path.join(runDir, "showDesc.txt")
@@ -1476,7 +1561,7 @@ def create_optimized_screenshots(videoFile, runDir, skip_indices=None):
     os.close(saved_stderr)
     if not video.isOpened():
         logging.error(f"Could not open video file: {videoFile}")
-        return False
+        return False, []
 
     total_duration = int(video.get(cv2.CAP_PROP_FRAME_COUNT)) / int(video.get(cv2.CAP_PROP_FPS))
     timestamps = [i * total_duration / 10 for i in range(1, 9)] # 8 screenshots
@@ -1516,8 +1601,63 @@ def create_optimized_screenshots(videoFile, runDir, skip_indices=None):
             f"Only {successful_screenshots} of {expected} screenshots were created successfully. "
             f"All {expected} are required."
         )
-        return False
+        return False, []
     logging.info(f"Created {successful_screenshots} optimized screenshots")
+    return True, timestamps
+
+def capture_source_screenshots(source_path: str, timestamps: list[float], run_dir: str) -> bool:
+    logging.info("Capturing source screenshots for comparison...")
+    screenshots_dir = os.path.join(run_dir, "screenshots")
+    if not os.path.isdir(screenshots_dir):
+        os.mkdir(screenshots_dir)
+
+    # Suppress ffmpeg/libav stderr
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved_stderr = os.dup(2)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    video = cv2.VideoCapture(source_path)
+    os.dup2(saved_stderr, 2)
+    os.close(saved_stderr)
+    if not video.isOpened():
+        logging.error(f"Could not open source file: {source_path}")
+        return False
+
+    successful_screenshots = 0
+    active_temp = None
+
+    try:
+        for i, timestamp in enumerate(timestamps):
+            video.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            success, image = video.read()
+            if success:
+                temp_png = os.path.join(screenshots_dir, f"source_temp_{i:02d}.png")
+                active_temp = temp_png
+                cv2.imwrite(temp_png, image)
+                final_path = os.path.join(screenshots_dir, f"source_{i:02d}.png")
+                optimize_screenshot(temp_png, final_path)
+                os.remove(temp_png)
+                active_temp = None
+                successful_screenshots += 1
+                logging.info(f"Source screenshot {i+1}/{len(timestamps)} created.")
+            else:
+                logging.warning(f"Failed to create source screenshot at timestamp {timestamp:.2f}s")
+    except KeyboardInterrupt:
+        logging.warning("Source screenshot generation interrupted. Cleaning up temporary files.")
+        raise
+    finally:
+        if active_temp and os.path.exists(active_temp):
+            os.remove(active_temp)
+        video.release()
+
+    expected = len(timestamps)
+    if successful_screenshots < expected:
+        logging.error(
+            f"Only {successful_screenshots} of {expected} source screenshots were created successfully. "
+            f"All {expected} are required."
+        )
+        return False
+    logging.info(f"Created {successful_screenshots} source screenshots for comparison")
     return True
 
 def optimize_screenshot(input_path, output_path, max_width=1920, quality=85):
@@ -1567,9 +1707,9 @@ def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash, onl
     logging.error(f"Failure: All upload methods failed for {image_name}.")
     return None
 
-def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api=None, max_workers=5):
+def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api=None, max_workers=5, file_pattern="screenshot_"):
     images = sorted([f for f in os.listdir(screenshot_dir)
-                     if f.startswith('screenshot_') and f.lower().endswith('.png')])
+                     if f.startswith(file_pattern) and f.lower().endswith('.png')])
     if not images:
         logging.warning("No screenshots found to upload!")
         return []

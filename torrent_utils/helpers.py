@@ -13,13 +13,26 @@ import zipfile
 import platform
 import subprocess
 import winsound
+import uuid
+import contextlib
+import time
+import random
 from base64 import b64encode
 from pprint import pformat
+from urllib.parse import unquote
 
 from babel import Locale
 from pymediainfo import MediaInfo
 
 DUMPFILE = "mediainfo.txt"
+_SLOWPICS_CONTEXT = {
+    "session": None,
+    "browser_id": None,
+    "xsrf_token": None,
+    "bootstrapped_at": 0.0,
+    "auth_fingerprint": None,
+}
+_SLOWPICS_CONTEXT_TTL_SECONDS = 300
 
 def get_path_list(arg_path, bulk_file_name):
     """
@@ -597,3 +610,292 @@ def upload_to_catbox(file_path: str, user_hash: str = None):
     except requests.exceptions.RequestException as e:
         logging.error(f"Catbox upload failed for {os.path.basename(file_path)}: {e}")
         return None
+
+def upload_to_slowpics(
+    image_pairs,
+    collection_name,
+    labels=None,
+    hdr_type="SDR",
+    remember_me=None,
+    session_cookie=None,
+    return_status=False,
+):
+    """
+    Upload source/encode frame pairs to slow.pics comparison.
+
+    Args:
+        image_pairs: list of (source_path, encode_path) tuples, one per frame in order
+        collection_name: the torrent name string used as collection title
+        labels: list of 2 labels, defaults to ["Source", "Encode"]
+        hdr_type: HDR type string (e.g. "SDR", "HDR10+", "DV")
+        remember_me: optional slow.pics remember-me cookie value
+        session_cookie: optional slow.pics SLP-SESSION cookie value
+        return_status: if True, returns dict with success/url/error_code/error_message
+
+    Returns:
+        When return_status=False (default): slow.pics URL string or None.
+        When return_status=True: dict with keys success, url, error_code, error_message.
+    """
+    if labels is None:
+        labels = ["Source", "Encode"]
+
+    if len(labels) < 2:
+        labels = ["Source", "Encode"]
+
+    def _result(url=None, error_code=None, error_message=None):
+        status = {
+            "success": bool(url),
+            "url": url,
+            "error_code": error_code,
+            "error_message": error_message,
+        }
+        if return_status:
+            return status
+        return url
+
+    def _log_error_response(stage, response):
+        snippet = (response.text or "").strip().replace("\n", " ")[:350]
+        logging.debug(
+            "slow.pics %s failed | status=%s | content-type=%s | cf-ray=%s | body=%s",
+            stage,
+            response.status_code,
+            response.headers.get("content-type"),
+            response.headers.get("cf-ray"),
+            snippet,
+        )
+
+    def _extract_api_error(response):
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload.get("error"), payload.get("message")
+        except Exception:
+            pass
+        return None, None
+
+    def _retry_after_seconds(response, fallback_seconds):
+        retry_after = response.headers.get("Retry-After")
+        if retry_after and retry_after.isdigit():
+            return max(1, int(retry_after))
+        return fallback_seconds
+
+    def _request_with_retry(session, method, url, stage, **kwargs):
+        max_attempts = 4
+        response = None
+        for attempt in range(max_attempts):
+            response = session.request(method, url, **kwargs)
+            if response.status_code != 429:
+                return response
+            wait_seconds = _retry_after_seconds(response, min(12, 2 + (attempt * 3)))
+            wait_seconds += random.uniform(0.0, 0.5)
+            logging.warning(
+                "slow.pics rate-limited during %s (attempt %s/%s). Waiting %.1fs and retrying.",
+                stage,
+                attempt + 1,
+                max_attempts,
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+        return response
+
+    def _bootstrap_context(force_refresh=False):
+        now = time.monotonic()
+        auth_fingerprint = (
+            "remember" if remember_me else "",
+            "session" if session_cookie else "",
+        )
+        cached_session = _SLOWPICS_CONTEXT.get("session")
+        cached_age = now - _SLOWPICS_CONTEXT.get("bootstrapped_at", 0.0)
+        if (
+            not force_refresh
+            and cached_session is not None
+            and cached_age < _SLOWPICS_CONTEXT_TTL_SECONDS
+            and _SLOWPICS_CONTEXT.get("auth_fingerprint") == auth_fingerprint
+        ):
+            return (
+                cached_session,
+                _SLOWPICS_CONTEXT.get("browser_id"),
+                _SLOWPICS_CONTEXT.get("xsrf_token"),
+            )
+
+        session = requests.Session()
+        if remember_me or session_cookie:
+            logging.info(
+                "slow.pics authenticated mode enabled (cookies: remember-me=%s, SLP-SESSION=%s)",
+                "set" if remember_me else "unset",
+                "set" if session_cookie else "unset",
+            )
+        if remember_me:
+            session.cookies.set("remember-me", remember_me, domain="slow.pics", path="/")
+        if session_cookie:
+            session.cookies.set("SLP-SESSION", session_cookie, domain="slow.pics", path="/")
+        bootstrap_headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) "
+                "Gecko/20100101 Firefox/149.0"
+            ),
+        }
+        bootstrap = _request_with_retry(
+            session,
+            "GET",
+            "https://slow.pics/comparison",
+            stage="bootstrap GET /comparison",
+            headers=bootstrap_headers,
+            timeout=30,
+        )
+        if bootstrap.status_code >= 400:
+            _log_error_response("bootstrap GET /comparison", bootstrap)
+        bootstrap.raise_for_status()
+
+        xsrf_token = session.cookies.get("XSRF-TOKEN")
+        if not xsrf_token:
+            raise RuntimeError("missing XSRF-TOKEN cookie")
+        xsrf_token = unquote(xsrf_token)
+
+        browser_id = str(uuid.uuid4())
+        session.cookies.set("BROWSER-ID", browser_id, domain="slow.pics", path="/")
+        if remember_me:
+            session.cookies.set("remember-me", remember_me, domain="slow.pics", path="/")
+        if session_cookie:
+            session.cookies.set("SLP-SESSION", session_cookie, domain="slow.pics", path="/")
+        _SLOWPICS_CONTEXT["session"] = session
+        _SLOWPICS_CONTEXT["browser_id"] = browser_id
+        _SLOWPICS_CONTEXT["xsrf_token"] = xsrf_token
+        _SLOWPICS_CONTEXT["bootstrapped_at"] = time.monotonic()
+        _SLOWPICS_CONTEXT["auth_fingerprint"] = auth_fingerprint
+        return session, browser_id, xsrf_token
+
+    try:
+        for attempt in range(2):
+            force_refresh = attempt == 1
+            session, browser_id, xsrf_token = _bootstrap_context(force_refresh=force_refresh)
+
+            headers = {
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Origin": "https://slow.pics",
+                "Referer": "https://slow.pics/comparison",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "X-XSRF-TOKEN": xsrf_token,
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) "
+                    "Gecko/20100101 Firefox/149.0"
+                ),
+            }
+
+            create_form = {
+                "collectionName": collection_name,
+                "browserId": browser_id,
+                "optimizeImages": "true",
+                "desiredFileType": "image/webp",
+                "hentai": "false",
+                "public": "true",
+                "visibility": "PUBLIC",
+                "removeAfter": "",
+                "canvasMode": "none",
+                "imageFit": "none",
+                "imagePosition": "center",
+            }
+
+            for i, _ in enumerate(image_pairs):
+                create_form[f"comparisons[{i}].name"] = f"{i:02d}"
+                create_form[f"comparisons[{i}].hentai"] = "false"
+                create_form[f"comparisons[{i}].sortOrder"] = str(i)
+                for j, label in enumerate(labels[:2]):
+                    create_form[f"comparisons[{i}].images[{j}].name"] = label.lower()
+                    create_form[f"comparisons[{i}].images[{j}].sortOrder"] = str(j)
+
+            create_response = _request_with_retry(
+                session,
+                "POST",
+                "https://slow.pics/upload/comparison",
+                stage="create comparison",
+                headers=headers,
+                data=create_form,
+                timeout=120,
+            )
+            if create_response.status_code >= 400:
+                _log_error_response("create comparison", create_response)
+            create_error_code, create_error_msg = _extract_api_error(create_response)
+            if create_error_code == "DAILY_LIMIT_UPLOAD":
+                logging.warning(
+                    "slow.pics daily upload limit reached. Message: %s",
+                    create_error_msg or create_error_code,
+                )
+                return _result(error_code=create_error_code, error_message=create_error_msg)
+            if create_response.status_code in (401, 403) and attempt == 0:
+                logging.warning("slow.pics rejected current session; refreshing session context and retrying once.")
+                continue
+            create_response.raise_for_status()
+            create_data = create_response.json()
+
+            key = create_data.get("key")
+            collection_uuid = create_data.get("collectionUuid")
+            image_uuid_sections = create_data.get("images")
+
+            if not key:
+                logging.warning("slow.pics returned no key in create response")
+                return _result(error_code="MISSING_KEY", error_message="slow.pics returned no key in create response")
+            if not collection_uuid or not isinstance(image_uuid_sections, list):
+                url = f"https://slow.pics/c/{key}"
+                logging.info(f"slow.pics comparison uploaded: {url}")
+                return _result(url=url)
+
+            with contextlib.ExitStack() as stack:
+                for i, (src_path, enc_path) in enumerate(image_pairs):
+                    uuids = image_uuid_sections[i] if i < len(image_uuid_sections) else None
+                    if not uuids or len(uuids) < 2:
+                        continue
+
+                    for j, image_path in enumerate([src_path, enc_path]):
+                        image_file = stack.enter_context(open(image_path, "rb"))
+                        upload_form = {
+                            "collectionUuid": collection_uuid,
+                            "imageUuid": uuids[j],
+                            "browserId": browser_id,
+                        }
+                        upload_files = {"file": (os.path.basename(image_path), image_file, "image/png")}
+                        upload_response = _request_with_retry(
+                            session,
+                            "POST",
+                            "https://slow.pics/upload/image",
+                            stage="upload image",
+                            headers=headers,
+                            data=upload_form,
+                            files=upload_files,
+                            timeout=120,
+                        )
+                        if upload_response.status_code >= 400:
+                            _log_error_response("upload image", upload_response)
+                        upload_error_code, upload_error_msg = _extract_api_error(upload_response)
+                        if upload_error_code == "DAILY_LIMIT_UPLOAD":
+                            logging.warning(
+                                "slow.pics daily upload limit reached during image upload. Message: %s",
+                                upload_error_msg or upload_error_code,
+                            )
+                            return _result(error_code=upload_error_code, error_message=upload_error_msg)
+                        if upload_response.status_code in (401, 403) and attempt == 0:
+                            logging.warning("slow.pics rejected image upload session; refreshing session context and retrying once.")
+                            break
+                        upload_response.raise_for_status()
+                    else:
+                        continue
+                    break
+                else:
+                    url = f"https://slow.pics/c/{key}"
+                    logging.info(f"slow.pics comparison uploaded: {url}")
+                    return _result(url=url)
+
+        logging.warning("slow.pics upload failed: session refresh retry exhausted")
+        return _result(
+            error_code="SESSION_RETRY_EXHAUSTED",
+            error_message="slow.pics upload failed after session refresh retry",
+        )
+
+    except Exception as e:
+        logging.warning(f"slow.pics upload failed: {e}")
+        return _result(error_code="EXCEPTION", error_message=str(e))

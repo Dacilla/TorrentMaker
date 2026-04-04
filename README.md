@@ -18,6 +18,7 @@ The main script for video content (movies and TV shows).
 6. Uploads screenshots concurrently to image hosts (PTPImg first, then ImgBB, then Catbox as fallback)
 7. Hashes the torrent using torf and writes it to `runs/NNN/`
 8. Optionally: creates a hardlink to the seeding directory, uploads to HUNO, injects into qBittorrent
+9. For source-vs-encode workflows, can create slow.pics comparisons (`/upload/comparison` + `/upload/image`) with optional authenticated cookies to reduce anonymous throttling
 
 For HUNO uploads, it checks for potential duplicate uploads via the HUNO filter API, detects anime and looks up the MAL ID via Jikan, and shows a payload preview before uploading. It supports both HUNO's automatic and manual upload modes.
 
@@ -155,9 +156,26 @@ Key settings:
 | `PTPIMG_API` | torrentmaker.py, musicTorrentMaker.py |
 | `IMGBB_API` | torrentmaker.py (fallback image host) |
 | `CATBOX_HASH` | torrentmaker.py (fallback image host) |
+| `SLOWPICS_REMEMBER_ME`, `SLOWPICS_SESSION` | torrentmaker.py (optional slow.pics authenticated uploads) |
 | `QBIT_HOST`, `QBIT_USERNAME`, `QBIT_PASSWORD` | torrentmaker.py, musicTorrentMaker.py |
 | `SEEDING_DIR` | torrentmaker.py, musicTorrentMaker.py |
 | `SEEDBOX_*` | musicTorrentMaker.py |
+
+### slow.pics Optional Auth
+
+If you use the slow.pics comparison upload feature and get frequent anonymous limits/rate-limits, set these optional fields in `settings.ini`:
+
+- `SLOWPICS_REMEMBER_ME`: value of the `remember-me` cookie from your browser session
+- `SLOWPICS_SESSION`: value of the `SLP-SESSION` cookie from your browser session
+
+How to get them:
+1. Log in at `https://slow.pics`
+2. Open browser DevTools -> Storage/Application -> Cookies -> `https://slow.pics`
+3. Copy the cookie values for `remember-me` and `SLP-SESSION` into `settings.ini`
+
+Notes:
+- Leave these blank to use anonymous slow.pics uploads.
+- slow.pics can still return API quota errors like `DAILY_LIMIT_UPLOAD`; TorrentMaker now logs this explicitly.
 
 ---
 

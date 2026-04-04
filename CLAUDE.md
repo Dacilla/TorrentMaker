@@ -53,7 +53,7 @@ python torrentmaker.py "path" -D
 ### `torrent_utils/` Module
 - **`config_loader.py`** — Reads `settings.ini`, auto-generates it from template if missing, updates missing fields while preserving user values, validates required fields per feature.
 - **`media.py`** — `MediaFile` base class with `Movie` and `TVShow` subclasses. Uses pymediainfo (JSON output) for codec/resolution/audio detection, guessit for filename parsing, TMDB API for metadata. Key methods: `get_resolution()`, `get_video_codec()`, `get_audio_info()`, `get_colour_space()`, `fetch_metadata()`, `generate_name()`.
-- **`helpers.py`** — 30+ utility functions: screenshot capture (OpenCV), image uploads, torrent hashing callbacks, qBittorrent injection (`qbitInject()`), MediaInfo/FLAC CLI auto-install, `get_path_list()` for CLI arg or bulk file loading.
+- **`helpers.py`** — 30+ utility functions: screenshot capture (OpenCV), image uploads, slow.pics comparison upload (session bootstrap, XSRF handling, `/upload/comparison` + `/upload/image` flow, rate-limit retry, explicit `DAILY_LIMIT_UPLOAD` handling), torrent hashing callbacks, qBittorrent injection (`qbitInject()`), MediaInfo/FLAC CLI auto-install, `get_path_list()` for CLI arg or bulk file loading.
 - **`HUNOInfo.py`** — Static data: banned encoder groups and trusted encoder group→member mappings for HUNO tracker.
 
 ### Data Flow (Video)
@@ -104,4 +104,4 @@ Local reference docs are checked into the repo root — consult these before gue
 
 ## Configuration
 
-All settings live in `settings.ini` under `[DEFAULT]`. Key sections: torrent client (QBIT_*), image hosts (PTPIMG_API, IMGBB_API, CATBOX_HASH), tracker APIs (HUNO_API, RED_API, OPS_API), tracker announce URLs, seeding directory path, and seedbox FTP/qBit credentials. `config_loader.py` is the single source of truth for field names — add new config fields there.
+All settings live in `settings.ini` under `[DEFAULT]`. Key sections: torrent client (QBIT_*), image hosts (PTPIMG_API, IMGBB_API, CATBOX_HASH), optional slow.pics auth cookies (`SLOWPICS_REMEMBER_ME`, `SLOWPICS_SESSION`), tracker APIs (HUNO_API, RED_API, OPS_API), tracker announce URLs, seeding directory path, and seedbox FTP/qBit credentials. `config_loader.py` is the single source of truth for field names — add new config fields there.
