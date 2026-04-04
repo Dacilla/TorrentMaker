@@ -964,17 +964,14 @@ def main():
         sys.exit(1)
 
     release_tag = detect_release_tag_from_path(path)
-    display_name = torrentFileName
+    base_name = re.sub(r'[<>:"/\\|?*\x00-\x1F\x7F]', "", torrentFileName)
+    base_name = re.sub(r'\.(mkv|mp4|avi|ts|m2ts)$', '', base_name, flags=re.IGNORECASE)
     if release_tag:
         logging.info(f"Detected release tag: '{release_tag}'")
-        display_name = f"{display_name} [{release_tag}]"
-    
-    torrentFileName = re.sub(r'[<>:"/\\|?*\x00-\x1F\x7F]', "", torrentFileName)
-    torrentFileName = re.sub(r'\.(mkv|mp4|avi|ts|m2ts)$', '', torrentFileName, flags=re.IGNORECASE)
-    torrentFileName += ".torrent"
-    display_torrent_name = re.sub(r'[<>:"/\\|?*\x00-\x1F\x7F]', "", display_name)
-    display_torrent_name = re.sub(r'\.(mkv|mp4|avi|ts|m2ts)$', '', display_torrent_name, flags=re.IGNORECASE)
-    display_torrent_name += ".torrent"
+        display_torrent_name = f"{base_name} [{release_tag}].torrent"
+    else:
+        display_torrent_name = f"{base_name}.torrent"
+    torrentFileName = f"{base_name}.torrent"
     logging.info("Final name: " + display_torrent_name)
 
     # --- Create mediainfo dumps ---
