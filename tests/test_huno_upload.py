@@ -86,6 +86,31 @@ class TestSourceTypeMap:
 
 
 # ---------------------------------------------------------------------------
+# detect_release_tag_from_path
+# ---------------------------------------------------------------------------
+
+class TestDetectReleaseTag:
+    def _call(self, path):
+        from torrentmaker import detect_release_tag_from_path
+        return detect_release_tag_from_path(path)
+
+    def test_detects_repack(self):
+        assert self._call(r"C:\releases\Movie.2025.1080p.REPACK-GRP") == "REPACK"
+
+    def test_detects_repack_number(self):
+        assert self._call(r"C:\releases\Movie.2025.1080p.REPACK2-GRP") == "REPACK2"
+
+    def test_detects_v2_as_repack2(self):
+        assert self._call(r"C:\releases\Movie.2025.1080p.v2-GRP") == "REPACK2"
+
+    def test_detects_proper(self):
+        assert self._call(r"C:\releases\Movie.2025.1080p.PROPER-GRP") == "PROPER"
+
+    def test_no_release_tag(self):
+        assert self._call(r"C:\releases\Movie.2025.1080p-GRP") is None
+
+
+# ---------------------------------------------------------------------------
 # HUNO upload response handling (integration-style, requests mocked)
 # ---------------------------------------------------------------------------
 

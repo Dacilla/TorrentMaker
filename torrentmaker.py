@@ -51,6 +51,7 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 # TODO: Add argument for personal releases to add a note like 'Please don't upload elsewhere without asking, thanks!'
 # TODO: Filter HUNO dupes check by same codec, resolution, and season number (for TV) to better identify true duplicates
 # TODO: Support bulk paths input to upload multiple season packs sequentially
+# TODO: Add personal release flag to add a note like 'Please don't upload elsewhere without asking, thanks!' and/or a custom note field for this
 
 # Maps --source argument (case-insensitive) to HUNO source_type IDs
 SOURCE_TYPE_MAP = {
@@ -167,6 +168,30 @@ def detect_edition_from_path(path: str) -> str | None:
         pattern = r'(?<![A-Za-z])' + re.escape(alias) + r'(?![A-Za-z])'
         if re.search(pattern, combined, re.IGNORECASE):
             return canonical
+    return None
+
+
+def detect_release_tag_from_path(path: str) -> str | None:
+    """Detects release tags such as PROPER/REPACK from a file or folder path."""
+    haystack = os.path.basename(os.path.normpath(path))
+    parent = os.path.basename(os.path.dirname(os.path.normpath(path)))
+    combined = f"{parent} {haystack}".upper()
+
+    repack_match = re.search(r'(?<![A-Z0-9])REPACK[ ._-]?(\d+)?(?![A-Z0-9])', combined)
+    if repack_match:
+        repack_num = repack_match.group(1)
+        if repack_num and int(repack_num) > 1:
+            return f"REPACK{repack_num}"
+        return "REPACK"
+
+    # Common scene form like "...v2" usually signals a repack revision.
+    revision_match = re.search(r'(?<![A-Z0-9])V([2-9]\d*)(?![A-Z0-9])', combined)
+    if revision_match:
+        return f"REPACK{revision_match.group(1)}"
+
+    if re.search(r'(?<![A-Z0-9])PROPER(?![A-Z0-9])', combined):
+        return "PROPER"
+
     return None
 
 
@@ -337,6 +362,8 @@ def print_huno_payload_preview(data: dict, torrent_name: str, source: str, inclu
         lines.append(f"  episode_number: {data.get('episode_number')}")
     if 'edition' in data:
         lines.append(f"  edition       : {data.get('edition')}")
+    if 'release_tag' in data:
+        lines.append(f"  release_tag   : {data.get('release_tag')}")
     if 'scaling_type' in data:
         _scaling_names = {1: 'DS4K', 2: 'AIUS'}
         st_val = data.get('scaling_type')
@@ -936,14 +963,19 @@ def main():
         logging.error(e)
         sys.exit(1)
 
-    if "repack" in path.lower() or 'v2' in path.lower():
-        base, ext = os.path.splitext(torrentFileName)
-        torrentFileName = f"{base} [REPACK]{ext}"
+    release_tag = detect_release_tag_from_path(path)
+    display_name = torrentFileName
+    if release_tag:
+        logging.info(f"Detected release tag: '{release_tag}'")
+        display_name = f"{display_name} [{release_tag}]"
     
     torrentFileName = re.sub(r'[<>:"/\\|?*\x00-\x1F\x7F]', "", torrentFileName)
     torrentFileName = re.sub(r'\.(mkv|mp4|avi|ts|m2ts)$', '', torrentFileName, flags=re.IGNORECASE)
     torrentFileName += ".torrent"
-    logging.info("Final name: " + torrentFileName)
+    display_torrent_name = re.sub(r'[<>:"/\\|?*\x00-\x1F\x7F]', "", display_name)
+    display_torrent_name = re.sub(r'\.(mkv|mp4|avi|ts|m2ts)$', '', display_torrent_name, flags=re.IGNORECASE)
+    display_torrent_name += ".torrent"
+    logging.info("Final name: " + display_torrent_name)
 
     # --- Create mediainfo dumps ---
     _prev_mi = os.path.join(prev_run, "mediainfo.txt") if prev_run else None
@@ -1175,6 +1207,8 @@ def main():
             data['streaming_service'] = streaming_service_val
         if edition:
             data['edition'] = edition
+        if release_tag:
+            data['release_tag'] = release_tag
         if MAL_ID:
             data['mal'] = MAL_ID
         if media_file.is_ds4k():
