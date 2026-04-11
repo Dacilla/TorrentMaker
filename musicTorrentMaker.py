@@ -34,6 +34,15 @@ from torrent_utils.helpers import (
     play_alert
 )
 from torrent_utils.config_loader import load_settings, validate_settings
+from torrent_utils.music_upload import (
+    MusicUploadMetadata,
+    build_ops_payload,
+    build_red_payload,
+    format_tracker_tags,
+    render_preflight_table,
+    scan_album,
+    with_metadata_overrides,
+)
 
 __VERSION = "1.4.2"
 LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-12s %(funcName)-16sL%(lineno)04d %(message)s"
@@ -69,7 +78,21 @@ def main():
         "--groupid",
         action="store",
         type=int,
+        help="RED group ID of existing album. Deprecated alias for --red-groupid.",
+        default=None
+    )
+    parser.add_argument(
+        "--red-groupid",
+        action="store",
+        type=int,
         help="RED group ID of existing album",
+        default=None
+    )
+    parser.add_argument(
+        "--ops-groupid",
+        action="store",
+        type=int,
+        help="OPS group ID of existing album",
         default=None
     )
     parser.add_argument(
@@ -103,6 +126,25 @@ def main():
         action="store_true",
         default=False,
         help="Enable to automatically upload to Orpheus (OPS)"
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        default=False,
+        help="Validate music folders and print an upload readiness table without creating torrents or uploading"
+    )
+    parser.add_argument(
+        "--tags",
+        action="store",
+        type=str,
+        default=None,
+        help="Comma-separated tracker tags to use when files do not have genre tags"
+    )
+    parser.add_argument(
+        "--skip-red-dryrun",
+        action="store_true",
+        default=False,
+        help="Skip the RED dry-run request before a real RED upload"
     )
     parser.add_argument(
         "-f",
@@ -167,7 +209,7 @@ def main():
     if arg.upload:
         required_settings.extend(['RED_API', 'RED_ANNOUNCE_URL', 'PTPIMG_API'])
     if arg.ops:
-        required_settings.extend(['OPS_API', 'OPS_ANNOUNCE_URL'])
+        required_settings.extend(['OPS_API', 'OPS_ANNOUNCE_URL', 'PTPIMG_API'])
     if arg.inject:
         required_settings.extend(['QBIT_HOST', 'QBIT_USERNAME', 'QBIT_PASSWORD'])
     if arg.sbcopy:
@@ -175,7 +217,8 @@ def main():
             'SEEDBOX_HOST', 'SEEDBOX_PORT', 'SEEDBOX_FTP_USER', 'SEEDBOX_FTP_PASSWORD',
             'SEEDBOX_QBIT_HOST', 'SEEDBOX_QBIT_USER', 'SEEDBOX_QBIT_PASSWORD'
         ])
-    required_settings.append('SEEDING_DIR')
+    if not arg.preflight:
+        required_settings.append('SEEDING_DIR')
 
     validate_settings(settings, required_settings)
     
@@ -203,33 +246,62 @@ def main():
     # --- END Settings Section ---
 
     pathList = get_path_list(arg.path, BULK_DOWNLOAD_FILE)
+    pathList = expand_music_paths(pathList)
+    logging.info(f"Expanded to {len(pathList)} music folder(s) to process.")
 
     # Initialise musicbrainz agent
     mb.set_useragent("My Music App", "1.0", "https://www.example.com")
 
+    if arg.preflight:
+        scans = []
+        mb_cache = {}
+        for path in pathList:
+            scan = scan_album(path, media=arg.source, tags_override=arg.tags, cover_path=arg.cover, original_year=arg.ogyear)
+            cache_key = (scan.metadata.artist, scan.metadata.title)
+            if scan.metadata.artist and scan.metadata.title:
+                if cache_key not in mb_cache:
+                    mb_cache[cache_key] = find_album_match(scan.metadata.artist, scan.metadata.title)
+                    sleep(1.1)
+                match = mb_cache[cache_key]
+                if match:
+                    rg = match.get('release-group', {})
+                    match_title = rg.get('title', '')
+                    match_id = rg.get('id', '')
+                    score = similarity(match_title, scan.metadata.title) if match_title else 0
+                    scan.group_match_status = f"MB {score:.0f}% {match_id[:8]}"
+                else:
+                    scan.group_match_status = "no MB match"
+            scans.append(scan)
+
+        print(render_preflight_table(scans))
+        if any(not scan.ok for scan in scans):
+            sys.exit(1)
+        return
+
     lastGroupID = None
     lastOpsGroupID = None
     lastAlbumTitle = None
+    red_group_ids_by_identity = {}
+    ops_group_ids_by_identity = {}
 
     for path in pathList:
-        if not check_file_path_length(path):
-            logging.info("A file path is too long in path: " + path)
-            if arg.skipPrompts:
-                logging.info("Skipping...")
-            else:
-                sys.exit()
-        
-        # Determine if album has multiple discs and get metadata
+        scan = scan_album(path, media=arg.source, tags_override=arg.tags, cover_path=arg.cover, original_year=arg.ogyear)
+        for warning in scan.warnings:
+            logging.warning(f"{os.path.basename(path)}: {warning}")
+        if (arg.upload or arg.ops) and scan.blockers:
+            logging.error(f"Preflight blockers for {path}: {pformat(scan.blockers)}")
+            logging.error("Skipping this album. Use --preflight for the full readiness table.")
+            continue
+
+        artist = scan.metadata.artist
+        album = scan.metadata.title
+        logging.info("Gotten artist: " + str(artist))
+        logging.info("Gotten album: " + str(album))
+
+        # Determine if album has multiple discs
         discsArr = []
         if os.path.exists(os.path.join(path, 'Disc 1')):
             discsArr = find_disc_folders(path)
-            artist = get_first_song_artist(os.path.join(path, 'Disc 1'))
-            album = get_first_song_album(os.path.join(path, 'Disc 1'))
-        else:
-            artist = get_first_song_artist(path)
-            album = get_first_song_album(path)
-        logging.info("Gotten artist: " + artist)
-        logging.info("Gotten album: " + album)
 
         # Match album with MusicBrainz to get release group info
         releaseForm = None
@@ -237,28 +309,23 @@ def main():
         if lastAlbumTitle != album or not arg.skipPrompts:
             logging.info("Finding artist info...")
             musicBrainzAlbumInfo = find_album_match(artist, album)
+            input_response = False
             if musicBrainzAlbumInfo:
                 similarityPercent = similarity(musicBrainzAlbumInfo['release-group']['title'], album)
                 logging.info("Similarity between album names: " + str(similarityPercent))
-                input_response = False
                 if similarityPercent < 90 and not arg.skipPrompts:
                     input_response = getUserInput(f"The two found albums aren't similar enough. Are these equal?\n'{musicBrainzAlbumInfo['release-group']['title']}', '{album}'")
-                if input_response or musicBrainzAlbumInfo['release-group']['title'] == album:
-                    releaseGroupID = musicBrainzAlbumInfo['release-group']['id']
+                accept_match = input_response or similarityPercent >= 90 or musicBrainzAlbumInfo['release-group']['title'] == album
+                if accept_match:
+                    release_group = musicBrainzAlbumInfo['release-group']
+                    releaseGroupID = release_group['id']
+                    releaseForm = release_group.get('type') or release_group.get('primary-type')
+                    if releaseForm == 'Other' and release_group.get('secondary-type-list'):
+                        releaseForm = release_group['secondary-type-list'][0]
                 else:
                     releaseGroupID = None
             else:
                 releaseGroupID = None
-                input_response = None
-
-            releaseForm = None
-            if input_response:
-                if 'type' in musicBrainzAlbumInfo['release-group']:
-                    releaseForm = musicBrainzAlbumInfo['release-group']['type']
-                    if musicBrainzAlbumInfo['release-group'] == 'Other':
-                        releaseForm = musicBrainzAlbumInfo['release-group']['secondary-type-list'][0]
-                elif 'primary-type' in musicBrainzAlbumInfo['release-group']:
-                    releaseForm = musicBrainzAlbumInfo['release-group']['primary-type']
         
         # Create a unique directory for this run's output files
         if not os.path.isdir("runs"):
@@ -354,10 +421,8 @@ def main():
         coverImgURL = ""
         if ptpimg_api:
             cover = None
-            if os.path.exists(os.path.join(path, "cover.jpg")):
-                cover = os.path.join(path, "cover.jpg")
-            elif os.path.exists(os.path.join(path, "cover.png")):
-                cover = os.path.join(path, "cover.png")
+            if scan.cover_path:
+                cover = scan.cover_path
             elif arg.cover:
                 cover = arg.cover
             else:
@@ -420,45 +485,51 @@ def main():
         torrent.write(runDir + torrentFileName)
         logging.info("Torrent file wrote to " + torrentFileName)
 
+        if arg.inject:
+            qbitInject(qbit_host, qbit_username, qbit_password, "music", runDir, torrentFileName, False, postName)
+
+        if arg.sbcopy:
+            ftp_copy_folder(path, seedbox_host, seedbox_port, seedbox_ftp_user, seedbox_ftp_password, seedbox_remote_path)
+            qbitInject(seedbox_qbit_host, seedbox_qbit_user, seedbox_qbit_password, "music", runDir, torrentFileName, False, postName)
+
         # --- Prepare common metadata for uploads ---
         if arg.upload or arg.ops:
-            if len(discsArr) > 0:
-                audioFormat = detect_audio_format(discsArr[0])
-                bitrate = get_bitrate_or_lossless(discsArr[0])
-                genre = get_genre(discsArr[0])
-                release_year = get_release_year(discsArr[0])
-                recordLabel = extract_label(discsArr[0])
-            else:
-                audioFormat = detect_audio_format(path)
-                bitrate = get_bitrate_or_lossless(path)
-                genre = get_genre(path)
-                release_year = get_release_year(path)
-                recordLabel = extract_label(path)
-
-            releaseType = get_album_type(discsArr if discsArr else path) if not releaseForm else releaseForm
+            upload_metadata = with_metadata_overrides(
+                scan.metadata,
+                image=coverImgURL,
+                release_type=releaseForm or scan.metadata.release_type,
+                release_group_id=releaseGroupID,
+            )
+            red_upload_succeeded = not arg.upload
             
             # --- Upload to REDacted ---
             if arg.upload:
                 logging.info("Attempting to upload to REDacted...")
-                redGroupId_to_use = arg.groupid
-                if not redGroupId_to_use and lastAlbumTitle == album:
-                    logging.info("Album name matches the last upload. Using the same REDacted group ID...")
-                    redGroupId_to_use = lastGroupID
+                redGroupId_to_use = arg.red_groupid or arg.groupid
+                if not redGroupId_to_use and upload_metadata.identity_key in red_group_ids_by_identity:
+                    logging.info("Album identity matches a previous REDacted upload. Using the same REDacted group ID...")
+                    redGroupId_to_use = red_group_ids_by_identity[upload_metadata.identity_key]
+
+                warn_tracker_duplicates("red", red_api, upload_metadata)
 
                 response_red = upload_to_red(runDir=runDir,
                                              torrent_file=os.path.join(runDir, torrentFileName),
-                                             artists=artist, title=album, year=release_year,
-                                             ogyear=arg.ogyear, releasetype=releaseType,
-                                             audioFormat=audioFormat, bitrate=bitrate, media=arg.source,
-                                             tags=genre, recordLabel=recordLabel, image=coverImgURL,
+                                             artists=upload_metadata.artist, title=upload_metadata.title, year=upload_metadata.year,
+                                             ogyear=None, releasetype=upload_metadata.release_type,
+                                             audioFormat=upload_metadata.audio_format, bitrate=upload_metadata.bitrate, media=upload_metadata.media,
+                                             tags=upload_metadata.tags, recordLabel=upload_metadata.record_label, image=upload_metadata.image,
                                              api=red_api, releaseGroup=releaseGroupID,
                                              redGroupId=redGroupId_to_use, noDesc=arg.nodesc,
-                                             skipPrompts=arg.skipPrompts)
+                                             skipPrompts=arg.skipPrompts,
+                                             dry_run=not arg.skip_red_dryrun,
+                                             edition_year=upload_metadata.edition_year)
                 if response_red:
                     try:
                         response_json = response_red.json()
                         if response_red.status_code == 200 and response_json.get('status') == 'success':
                             lastGroupID = response_json['response']['groupid']
+                            red_group_ids_by_identity[upload_metadata.identity_key] = lastGroupID
+                            red_upload_succeeded = True
                             logging.info(f"Saved new REDacted Group ID: {lastGroupID}")
                         else:
                             logging.error(f"REDacted API returned an error: {response_json.get('error', 'Unknown error')}")
@@ -468,27 +539,33 @@ def main():
                 
             # --- Upload to Orpheus ---
             if arg.ops:
+                if arg.upload and not red_upload_succeeded:
+                    logging.error("Skipping Orpheus upload because REDacted did not complete successfully.")
+                    continue
                 logging.info("Attempting to upload to Orpheus...")
-                opsGroupId_to_use = None
-                if lastAlbumTitle == album:
-                    logging.info("Album name matches the last upload. Using the same Orpheus group ID...")
-                    opsGroupId_to_use = lastOpsGroupID
+                opsGroupId_to_use = arg.ops_groupid
+                if not opsGroupId_to_use and upload_metadata.identity_key in ops_group_ids_by_identity:
+                    logging.info("Album identity matches a previous Orpheus upload. Using the same Orpheus group ID...")
+                    opsGroupId_to_use = ops_group_ids_by_identity[upload_metadata.identity_key]
+
+                warn_tracker_duplicates("ops", ops_api, upload_metadata)
 
                 response_ops = upload_to_orpheus(runDir=runDir,
-                                  torrent_file=os.path.join(runDir, torrentFileName),
-                                  artists=artist, title=album, year=release_year,
-                                  releasetype=releaseType, audioFormat=audioFormat,
-                                  bitrate=bitrate, media=arg.source, tags=genre,
-                                  image=coverImgURL, api=ops_api,
-                                  recordLabel=recordLabel,
-                                  remaster_year=arg.ogyear,
-                                  opsGroupId=opsGroupId_to_use,
-                                  skipPrompts=arg.skipPrompts)
+                                   torrent_file=os.path.join(runDir, torrentFileName),
+                                   artists=upload_metadata.artist, title=upload_metadata.title, year=upload_metadata.year,
+                                   releasetype=upload_metadata.release_type, audioFormat=upload_metadata.audio_format,
+                                   bitrate=upload_metadata.bitrate, media=upload_metadata.media, tags=upload_metadata.tags,
+                                   image=upload_metadata.image, api=ops_api,
+                                   recordLabel=upload_metadata.record_label,
+                                   remaster_year=upload_metadata.edition_year,
+                                   opsGroupId=opsGroupId_to_use,
+                                   skipPrompts=arg.skipPrompts)
                 if response_ops:
                     try:
                         response_json = response_ops.json()
                         if response_ops.status_code == 200 and response_json.get('status') == 'success':
                             lastOpsGroupID = response_json['response']['groupId']
+                            ops_group_ids_by_identity[upload_metadata.identity_key] = lastOpsGroupID
                             logging.info(f"Saved new Orpheus Group ID: {lastOpsGroupID}")
                         else:
                             logging.error(f"Orpheus API returned an error: {response_json.get('error', 'Unknown error')}")
@@ -497,6 +574,90 @@ def main():
                         logging.error(f"Response Text: {response_ops.text}")
 
         lastAlbumTitle = album
+
+def _tracker_headers(tracker: str, api: str):
+    if tracker == "ops":
+        return {"Authorization": f"token {api}"}
+    return {
+        "Authorization": api,
+        "User-Agent": "TorrentMaker/1.4.2"
+    }
+
+
+def search_tracker_duplicates(tracker: str, api: str, metadata: MusicUploadMetadata):
+    """Return likely duplicate browse results, or an empty list if lookup fails."""
+    if not api:
+        return []
+    if tracker == "ops":
+        url = "https://orpheus.network/ajax.php?action=browse"
+    else:
+        url = "https://redacted.ch/ajax.php?action=browse"
+    params = {
+        "artistname": metadata.artist,
+        "groupname": metadata.title,
+        "year": metadata.year,
+        "format": metadata.audio_format,
+        "encoding": metadata.bitrate,
+        "media": metadata.media,
+    }
+    try:
+        response = requests.get(url, headers=_tracker_headers(tracker, api), params=params, timeout=20)
+        response.raise_for_status()
+        body = response.json()
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as exc:
+        logging.warning(f"{tracker.upper()} duplicate lookup failed: {exc}")
+        return []
+    if body.get("status") != "success":
+        logging.warning(f"{tracker.upper()} duplicate lookup returned API failure: {body.get('error', 'Unknown error')}")
+        return []
+    response_obj = body.get("response", {})
+    if isinstance(response_obj, list):
+        return response_obj
+    results = response_obj.get("results", []) if isinstance(response_obj, dict) else []
+    if isinstance(results, list):
+        return results
+    return []
+
+
+def warn_tracker_duplicates(tracker: str, api: str, metadata: MusicUploadMetadata):
+    duplicates = search_tracker_duplicates(tracker, api, metadata)
+    if duplicates:
+        logging.warning(
+            f"{tracker.upper()} browse found {len(duplicates)} likely duplicate result(s) for "
+            f"{metadata.artist} - {metadata.title} ({metadata.year}) {metadata.audio_format} {metadata.bitrate} {metadata.media}."
+        )
+
+
+def _has_audio_files(path: str, recursive: bool = False) -> bool:
+    walker = os.walk(path) if recursive else [(path, [], os.listdir(path) if os.path.isdir(path) else [])]
+    for _, _, files in walker:
+        for file_name in files:
+            if file_name.lower().endswith((".mp3", ".flac")):
+                return True
+    return False
+
+
+def expand_music_paths(paths):
+    """Expand collection folders into immediate album folders, preserving multi-disc album roots."""
+    expanded = []
+    for path in paths:
+        if not os.path.isdir(path) or _has_audio_files(path, recursive=False):
+            expanded.append(path)
+            continue
+
+        child_dirs = [
+            os.path.join(path, name)
+            for name in sorted(os.listdir(path))
+            if os.path.isdir(os.path.join(path, name))
+        ]
+        if any(os.path.basename(child).lower().startswith("disc") for child in child_dirs):
+            expanded.append(path)
+            continue
+
+        album_dirs = [child for child in child_dirs if _has_audio_files(child, recursive=True)]
+        expanded.extend(album_dirs or [path])
+    return expanded
+
 
 def check_md5_signatures(directory):
     """
@@ -530,7 +691,7 @@ def check_md5_signatures(directory):
     
     return missing_md5
 
-def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, redGroupId=None, ogyear=None, noDesc=False, skipPrompts=False):
+def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, redGroupId=None, ogyear=None, noDesc=False, skipPrompts=False, dry_run=True, edition_year=None):
     """Constructs and sends the upload request to the REDacted API."""
     url = "https://redacted.ch/ajax.php?action=upload"
 
@@ -544,60 +705,66 @@ def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, 
     if 'remix' in title.lower():
         releasetype = 'Remix'
 
-    release_types = {
-        'Album': 1, 'Soundtrack': 3, 'EP': 5, 'Anthology': 6, 'Compilation': 7,
-        'Single': 9, 'Live album': 11, 'Remix': 13, 'Bootleg': 14, 'Interview': 15,
-        'Mixtape': 16, 'Demo': 17, 'Concert Recording': 18, 'DJ Mix': 19, 'Unknown': 21
-    }
-    releasetype_id = release_types.get(releasetype, None)
-
-    tags_str: str = format_genres(tags)
-    if len(tags_str) > 0:
-        tags_str += ", " + str(year)[:3] + '0s'
-    else:
-        tags_str = str(year)[:3] + '0s'
-    logging.info("Tags: " + tags_str)
-    
-    artists_list = artists.split(', ')
-    importance = ['Main'] * len(artists_list)
-    importance_ids = convert_roles_to_int(importance)
-    
-    remasteryear = year
+    initial_year = year
     if ogyear:
-        year = ogyear
+        initial_year = ogyear
+        edition_year = year
+
+    metadata = MusicUploadMetadata(
+        artist=artists,
+        title=title,
+        year=initial_year,
+        release_type=releasetype,
+        audio_format=audioFormat,
+        bitrate=bitrate,
+        media=media,
+        tags=format_tracker_tags(tags),
+        image=image,
+        record_label=recordLabel,
+        edition_year=edition_year,
+        release_group_id=releaseGroup,
+    )
 
     headers = {
         "Authorization": api,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
     }
 
-    data = {
-        'type': 0, 'title': title, 'year': year, 'remaster_year': remasteryear,
-        'releasetype': releasetype_id, 'format': audioFormat, 'bitrate': bitrate,
-        'media': media, 'image': image, 'tags': tags_str, 'album_desc': albumDesc
-    }
-
-    if noDesc:
-        data.pop('album_desc')
-
-    if redGroupId:
-        data['groupid'] = redGroupId
-
     if recordLabel:
         if len(recordLabel) < 2 or len(recordLabel) > 80:
             play_alert("input")
             recordLabel = input("Gotten record label too long or too short for RED\nGotten label: " + recordLabel + "\nPlease input a record label:\n")
-        if 'records dk' in recordLabel.lower() or artists_list[0].lower() == recordLabel.lower():
+        first_artist = artists.split(',')[0].strip()
+        if 'records dk' in recordLabel.lower() or first_artist.lower() == recordLabel.lower():
             recordLabel = 'Self-Released'
-        data['remaster_record_label'] = recordLabel
+        metadata.record_label = recordLabel
 
-    for i, artist_name in enumerate(artists_list):
-        data[f"artists[{i}]"] = artist_name
-        data[f"importance[{i}]"] = importance_ids[i]
+    try:
+        data = build_red_payload(metadata, albumDesc, group_id=redGroupId, no_desc=noDesc)
+        dryrun_data = build_red_payload(metadata, albumDesc, group_id=redGroupId, dryrun=True, no_desc=noDesc)
+    except ValueError as exc:
+        logging.error(f"REDacted upload payload is incomplete: {exc}")
+        return None
 
     pprint(data)
     if skipPrompts or getUserInput("Do you want to upload this to REDacted?"):
         try:
+            if dry_run:
+                logging.info("Sending REDacted dry-run upload request...")
+                with open(torrent_file, 'rb') as torrent_f:
+                    dryrun_response = requests.post(headers=headers, url=url, data=dryrun_data, files={'file_input': torrent_f}, timeout=30)
+                dryrun_response.raise_for_status()
+                try:
+                    dryrun_json = dryrun_response.json()
+                except json.JSONDecodeError:
+                    logging.error(f"REDacted dry-run did not return JSON: {dryrun_response.text}")
+                    return None
+                if dryrun_json.get('status') != 'success':
+                    logging.error(f"REDacted dry-run failed: {dryrun_json.get('error', 'Unknown error')}")
+                    logging.error(f"Response content: {dryrun_response.text}")
+                    return None
+                logging.info("REDacted dry-run succeeded.")
+
             with open(torrent_file, 'rb') as torrent_f:
                 torrent_payload = {'file_input': torrent_f}
                 response = requests.post(headers=headers, url=url, data=data, files=torrent_payload, timeout=30)
@@ -620,36 +787,27 @@ def upload_to_orpheus(runDir, torrent_file, artists: str, title: str, year, rele
     with open(os.path.join(runDir, "trackData.txt"), 'r', encoding='UTF-8') as _td:
         albumDesc = _td.read()
 
-    release_types = {
-        'Album': 1, 'Soundtrack': 3, 'EP': 5, 'Anthology': 6, 'Compilation': 7,
-        'Single': 9, 'Live album': 11, 'Remix': 13, 'Bootleg': 14, 'Interview': 15,
-        'Mixtape': 16, 'Demo': 17, 'Concert Recording': 18, 'DJ Mix': 19, 'Unknown': 21
-    }
-    releasetype_id = release_types.get(releasetype, 21) # Default to Unknown
-
-    artists_list = artists.split(', ')
-    
-    data = {
-        'type': 0, 'title': title, 'year': year, 'releasetype': releasetype_id,
-        'format': audioFormat, 'bitrate': bitrate, 'media': media,
-        'tags': tags.replace(' ', '.').lower(), 'image': image, 'album_desc': albumDesc,
-        'release_desc': ''
-    }
+    metadata = MusicUploadMetadata(
+        artist=artists,
+        title=title,
+        year=year,
+        release_type=releasetype,
+        audio_format=audioFormat,
+        bitrate=bitrate,
+        media=media,
+        tags=format_tracker_tags(tags),
+        image=image,
+        record_label=recordLabel,
+        edition_year=remaster_year,
+    )
+    try:
+        data = build_ops_payload(metadata, albumDesc, group_id=opsGroupId)
+    except ValueError as exc:
+        logging.error(f"Orpheus upload payload is incomplete: {exc}")
+        return None
 
     if opsGroupId:
-        data['groupid'] = opsGroupId
         logging.info(f"Using existing Orpheus Group ID: {opsGroupId}")
-
-    for i, artist_name in enumerate(artists_list):
-        data[f'artists[{i}]'] = artist_name
-        data[f'importance[{i}]'] = 1 # 1 for Main
-
-    if recordLabel:
-        data['record_label'] = recordLabel
-        
-    if remaster_year:
-        data['remaster'] = 1
-        data['remaster_year'] = remaster_year
 
     pprint(data)
     if skipPrompts or getUserInput("Do you want to upload this to Orpheus?"):
