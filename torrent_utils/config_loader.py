@@ -14,6 +14,7 @@ CONFIG_STRUCTURE = {
         '# API Keys': '',
         'TMDB_API': '',
         'IMGBB_API': '',
+        'HAWKEPICS_API': '',
         'PTPIMG_API': '',
         'ONLYIMAGE_API': '',
         'CATBOX_HASH': '',

@@ -34,7 +34,7 @@ from torrent_utils.helpers import (
     getInfoDump, getUserInput, has_folders, cb, uploadToPTPIMG,
     copy_folder_structure, qbitInject, FileOrFolder, is_valid_torf_hash,
     convert_sha1_hash, ensure_mediainfo_cli, upload_to_catbox, upload_to_imgbb,
-    upload_to_onlyimage, play_alert, upload_to_slowpics
+    upload_to_onlyimage, upload_to_hawkepics, play_alert, upload_to_slowpics
 )
 from torrent_utils.media import Movie, TVShow
 
@@ -690,6 +690,7 @@ def main():
     qbit_username = settings.get('QBIT_USERNAME')
     qbit_password = settings.get('QBIT_PASSWORD')
     qbit_host = settings.get('QBIT_HOST')
+    hawkepics_api = settings.get('HAWKEPICS_API')
     ptpimg_api = settings.get('PTPIMG_API')
     onlyimage_api = settings.get('ONLYIMAGE_API')
     catbox_hash = settings.get('CATBOX_HASH')
@@ -697,6 +698,7 @@ def main():
     slowpics_session = settings.get('SLOWPICS_SESSION')
     seeding_dir = settings.get('SEEDING_DIR')
 
+    if hawkepics_api == '': hawkepics_api = None
     if ptpimg_api == '': ptpimg_api = None
     if onlyimage_api == '': onlyimage_api = None
     if catbox_hash == '': catbox_hash = None
@@ -1059,6 +1061,7 @@ def main():
     elif arg.upload and screenshot_success:
         bbcodes = upload_screenshots_concurrently(
             screenshot_dir=os.path.join(runDir, "screenshots"),
+            hawkepics_api=hawkepics_api,
             imgbb_api=imgbb_api,
             ptpimg_api=ptpimg_api,
             catbox_hash=catbox_hash,
@@ -1081,6 +1084,7 @@ def main():
         if source_ok and arg.upload:
             source_bbcodes = upload_screenshots_concurrently(
                 screenshot_dir=os.path.join(runDir, "screenshots"),
+                hawkepics_api=hawkepics_api,
                 imgbb_api=imgbb_api,
                 ptpimg_api=ptpimg_api,
                 catbox_hash=catbox_hash,
@@ -1673,32 +1677,39 @@ def optimize_screenshot(input_path, output_path, max_width=1920, quality=85):
         logging.error(f"Failed to optimize screenshot {input_path}: {e}")
         shutil.copy(input_path, output_path)
 
-def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api=None):
+def upload_single_screenshot(image_path, hawkepics_api, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api=None):
     image_name = os.path.basename(image_path)
     logging.info(f"Uploading {image_name}...")
 
-    # --- Attempt 1: PTPImg (if API key is provided) ---
+    # --- Attempt 1: hawke.pics (if API key is provided) ---
+    if hawkepics_api:
+        image_url = upload_to_hawkepics(image_path, hawkepics_api)
+        if image_url:
+            logging.info(f"Success: Successfully uploaded {image_name} to hawke.pics.")
+            return f"[url={image_url}][img]{image_url}[/img][/url]"
+
+    # --- Attempt 2: PTPImg (if API key is provided) ---
     if ptpimg_api:
         image_url = uploadToPTPIMG(image_path, ptpimg_api)
         if image_url:
             logging.info(f"Success: Successfully uploaded {image_name} to PTPImg.")
             return f"[url={image_url}][img]{image_url}[/img][/url]"
 
-    # --- Attempt 2: OnlyImage (if API key is provided) ---
+    # --- Attempt 3: OnlyImage (if API key is provided) ---
     if onlyimage_api:
         image_url = upload_to_onlyimage(image_path, onlyimage_api)
         if image_url:
             logging.info(f"Success: Successfully uploaded {image_name} to OnlyImage.")
             return f"[url={image_url}][img]{image_url}[/img][/url]"
 
-    # --- Attempt 3: ImgBB (if API key is provided) ---
+    # --- Attempt 4: ImgBB (if API key is provided) ---
     if imgbb_api:
         image_url, _ = upload_to_imgbb(image_path, imgbb_api) # We only need the direct URL
         if image_url:
             logging.info(f"Success: Successfully uploaded {image_name} to ImgBB.")
             return f"[url={image_url}][img]{image_url}[/img][/url]"
 
-    # --- Attempt 4: Catbox (fallback) ---
+    # --- Attempt 5: Catbox (fallback) ---
     image_url = upload_to_catbox(image_path, catbox_hash)
     if image_url:
         logging.info(f"Success: Successfully uploaded {image_name} to Catbox.")
@@ -1707,7 +1718,7 @@ def upload_single_screenshot(image_path, imgbb_api, ptpimg_api, catbox_hash, onl
     logging.error(f"Failure: All upload methods failed for {image_name}.")
     return None
 
-def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api=None, max_workers=5, file_pattern="screenshot_"):
+def upload_screenshots_concurrently(screenshot_dir, hawkepics_api, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api=None, max_workers=5, file_pattern="screenshot_"):
     images = sorted([f for f in os.listdir(screenshot_dir)
                      if f.startswith(file_pattern) and f.lower().endswith('.png')])
     if not images:
@@ -1718,7 +1729,7 @@ def upload_screenshots_concurrently(screenshot_dir, imgbb_api, ptpimg_api, catbo
     bbcodes = [None] * len(images)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_index = {executor.submit(upload_single_screenshot, path, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api): i for i, path in enumerate(image_paths)}
+        future_to_index = {executor.submit(upload_single_screenshot, path, hawkepics_api, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api): i for i, path in enumerate(image_paths)}
         for future in as_completed(future_to_index):
             index = future_to_index[future]
             try:

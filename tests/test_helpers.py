@@ -297,3 +297,49 @@ class TestUploadToOnlyimage:
         with patch("torrent_utils.helpers.requests.post", return_value=mock_resp):
             url = upload_to_onlyimage(str(img), "key")
         assert url is None
+
+
+# ---------------------------------------------------------------------------
+# upload_to_hawkepics
+# ---------------------------------------------------------------------------
+
+class TestUploadToHawkepics:
+    def test_success(self, tmp_path):
+        from torrent_utils.helpers import upload_to_hawkepics
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "status_code": 200,
+            "image": {"url": "https://hawke.pics/image/abc123.png"}
+        }
+        with patch("torrent_utils.helpers.requests.post", return_value=mock_resp) as mock_post:
+            url = upload_to_hawkepics(str(img), "apikey")
+        assert url == "https://hawke.pics/image/abc123.png"
+        assert mock_post.call_args.kwargs["headers"] == {"X-API-Key": "apikey"}
+
+    def test_http_error_returns_none(self, tmp_path):
+        from torrent_utils.helpers import upload_to_hawkepics
+        import requests as req
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = req.exceptions.HTTPError("401")
+        with patch("torrent_utils.helpers.requests.post", return_value=mock_resp):
+            url = upload_to_hawkepics(str(img), "badkey")
+        assert url is None
+
+    def test_bad_status_code_returns_none(self, tmp_path):
+        from torrent_utils.helpers import upload_to_hawkepics
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "status_code": 400,
+            "error": {"message": "Invalid API key"}
+        }
+        with patch("torrent_utils.helpers.requests.post", return_value=mock_resp):
+            url = upload_to_hawkepics(str(img), "badkey")
+        assert url is None

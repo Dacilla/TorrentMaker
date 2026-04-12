@@ -45,7 +45,7 @@ python torrentmaker.py "path" -D
 ## Architecture
 
 ### Entry Points
-- **`torrentmaker.py`** — Movies and TV shows. Creates `.torrent` files, captures 8 screenshots, uploads images concurrently (PTPImg → ImgBB → Catbox fallback chain), queries TMDB, generates BBCode descriptions, optionally uploads to HUNO/Aither and injects into qBittorrent.
+- **`torrentmaker.py`** — Movies and TV shows. Creates `.torrent` files, captures 8 screenshots, uploads images concurrently (hawke.pics → PTPImg → OnlyImage → ImgBB → Catbox fallback chain), queries TMDB, generates BBCode descriptions, optionally uploads to HUNO/Aither and injects into qBittorrent.
 - **`musicTorrentMaker.py`** — Music albums. Integrates with MusicBrainz, handles FLAC checksums, uploads to RED/OPS, supports FTP seedbox copy.
 - **`fileRenamer.py`** — Renames files using TMDB + Guessit + Levenshtein similarity matching.
 - **`torrentEdit.py`** — Patches source field in existing `.torrent` files.
@@ -104,4 +104,4 @@ Local reference docs are checked into the repo root — consult these before gue
 
 ## Configuration
 
-All settings live in `settings.ini` under `[DEFAULT]`. Key sections: torrent client (QBIT_*), image hosts (PTPIMG_API, IMGBB_API, CATBOX_HASH), optional slow.pics auth cookies (`SLOWPICS_REMEMBER_ME`, `SLOWPICS_SESSION`), tracker APIs (HUNO_API, RED_API, OPS_API), tracker announce URLs, seeding directory path, and seedbox FTP/qBit credentials. `config_loader.py` is the single source of truth for field names — add new config fields there.
+All settings live in `settings.ini` under `[DEFAULT]`. Key sections: torrent client (QBIT_*), image hosts (HAWKEPICS_API, PTPIMG_API, ONLYIMAGE_API, IMGBB_API, CATBOX_HASH), optional slow.pics auth cookies (`SLOWPICS_REMEMBER_ME`, `SLOWPICS_SESSION`), tracker APIs (HUNO_API, RED_API, OPS_API), tracker announce URLs, seeding directory path, and seedbox FTP/qBit credentials. `config_loader.py` is the single source of truth for field names — add new config fields there.

@@ -501,6 +501,32 @@ def upload_to_onlyimage(file_path: str, api_key: str):
         logging.error(f"OnlyImage returned invalid data for {os.path.basename(file_path)}: {e}")
         return None
 
+def upload_to_hawkepics(file_path: str, api_key: str):
+    """Uploads an image to hawke.pics (Chevereto) with robust error handling."""
+    api_endpoint = "https://hawke.pics/api/1/upload"
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'source': (os.path.basename(file_path), f)}
+            headers = {'X-API-Key': api_key}
+            response = requests.post(api_endpoint, headers=headers, files=files, timeout=30)
+        response.raise_for_status()
+
+        response_data = response.json()
+        if response_data.get('status_code') == 200:
+            image_url = response_data['image']['url']
+            return image_url
+        else:
+            error_msg = response_data.get('error', {}).get('message', 'Unknown error')
+            logging.error(f"hawke.pics upload failed for {os.path.basename(file_path)}: {error_msg}")
+            return None
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"hawke.pics upload failed for {os.path.basename(file_path)}: {e}")
+        return None
+    except (json.JSONDecodeError, KeyError) as e:
+        logging.error(f"hawke.pics returned invalid data for {os.path.basename(file_path)}: {e}")
+        return None
+
 def copy_folder_structure(src_path, dst_path):
     # Create the destination folder if it doesn't exist
     if not os.path.exists(dst_path):

@@ -15,7 +15,7 @@ The main script for video content (movies and TV shows).
 3. Queries TMDB for title, year, genre, and poster
 4. Generates a standardized filename, optionally in HUNO tracker format
 5. Captures 8 screenshots at distributed timestamps using OpenCV
-6. Uploads screenshots concurrently to image hosts (PTPImg first, then ImgBB, then Catbox as fallback)
+6. Uploads screenshots concurrently to image hosts (hawke.pics first, then PTPImg, OnlyImage, ImgBB, and Catbox as fallback)
 7. Hashes the torrent using torf and writes it to `runs/NNN/`
 8. Optionally: creates a hardlink to the seeding directory, uploads to HUNO, injects into qBittorrent
 9. For source-vs-encode workflows, can create slow.pics comparisons (`/upload/comparison` + `/upload/image`) with optional authenticated cookies to reduce anonymous throttling
@@ -153,7 +153,9 @@ Key settings:
 | `HUNO_API` | torrentmaker.py |
 | `RED_API`, `RED_ANNOUNCE_URL` | musicTorrentMaker.py |
 | `OPS_API`, `OPS_ANNOUNCE_URL` | musicTorrentMaker.py |
+| `HAWKEPICS_API` | torrentmaker.py (first-priority screenshot host) |
 | `PTPIMG_API` | torrentmaker.py, musicTorrentMaker.py |
+| `ONLYIMAGE_API` | torrentmaker.py (fallback image host) |
 | `IMGBB_API` | torrentmaker.py (fallback image host) |
 | `CATBOX_HASH` | torrentmaker.py (fallback image host) |
 | `SLOWPICS_REMEMBER_ME`, `SLOWPICS_SESSION` | torrentmaker.py (optional slow.pics authenticated uploads) |
