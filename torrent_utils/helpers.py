@@ -373,6 +373,13 @@ def getInfoDump(filePath: str, runDir: str, filename: str = DUMPFILE):
 
 _last_alert_time = 0.0
 
+def _alerts_disabled() -> bool:
+    return (
+        os.environ.get("PYTEST_CURRENT_TEST") is not None
+        or os.environ.get("TORRENTMAKER_DISABLE_ALERTS", "").lower() in {"1", "true", "yes", "on"}
+    )
+
+
 def _terminal_is_focused() -> bool:
     """Returns True if the console window associated with this process is the foreground window.
     Note: unreliable under Windows Terminal, which uses a hidden conhost window."""
@@ -389,6 +396,8 @@ def play_alert(kind: str = "input"):
     Suppressed if called within 10 seconds of the last alert, or if the terminal is in focus."""
     global _last_alert_time
     import time
+    if _alerts_disabled():
+        return
     now = time.monotonic()
     if now - _last_alert_time < 10.0:
         return
@@ -404,11 +413,12 @@ def play_alert(kind: str = "input"):
         pass
 
 
-def getUserInput(question: str):
+def getUserInput(question: str, alert: bool = True):
     question = question + " [y, n]"
     Userinput = None
     while Userinput not in ["y", "yes", "n", "no"]:
-        play_alert("input")
+        if alert:
+            play_alert("input")
         Userinput = input(question)
         if Userinput in ["y", "yes"]:
             return True

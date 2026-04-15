@@ -62,6 +62,30 @@ class TestSimilarity:
 
 
 # ---------------------------------------------------------------------------
+# prompt alerts
+# ---------------------------------------------------------------------------
+
+class TestPromptAlerts:
+    def test_get_user_input_can_run_without_alert(self):
+        from torrent_utils import helpers
+
+        with patch("builtins.input", return_value="y"), patch("torrent_utils.helpers.play_alert") as alert:
+            assert helpers.getUserInput("Continue?", alert=False) is True
+
+        alert.assert_not_called()
+
+    def test_play_alert_is_suppressed_under_pytest(self):
+        from torrent_utils import helpers
+
+        helpers._last_alert_time = 0.0
+        with patch("torrent_utils.helpers._terminal_is_focused", return_value=False), \
+             patch("torrent_utils.helpers.winsound.MessageBeep") as beep:
+            helpers.play_alert("input")
+
+        beep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # get_season / get_episode
 # ---------------------------------------------------------------------------
 

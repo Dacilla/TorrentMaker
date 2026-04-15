@@ -30,8 +30,7 @@ from concurrent import futures
 
 from torrent_utils.helpers import (
     has_folders, cb, uploadToPTPIMG, copy_folder_structure,
-    getUserInput, qbitInject, similarity, get_path_list, ensure_flac_cli,
-    play_alert
+    getUserInput as _getUserInput, qbitInject, similarity, get_path_list, ensure_flac_cli,
 )
 from torrent_utils.config_loader import load_settings, validate_settings
 from torrent_utils.music_upload import (
@@ -49,6 +48,107 @@ LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s P%(process)06d.%(module)-1
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 BULK_DOWNLOAD_FILE = os.path.join(os.getcwd(), "bulkProcess.txt")
+RED_BASE_URL = "https://redacted.sh"
+MD5_MISSING_BLOCKER = "one or more FLAC files have missing MD5 signatures"
+
+
+def getUserInput(question: str):
+    return _getUserInput(question, alert=False)
+
+
+def tracker_torrent_filename(base_name: str, tracker_source: str | None = None) -> str:
+    if not tracker_source:
+        return base_name
+    root, ext = os.path.splitext(base_name)
+    return f"{root} [{tracker_source}]{ext or '.torrent'}"
+
+
+def create_torrent_file(content_path: str, run_dir: str, torrent_file_name: str, announce_url: str | None = None, source: str | None = None, tracker_label: str = "local") -> str:
+    torrent = torf.Torrent()
+    torrent.private = True
+    if source:
+        torrent.source = source
+    if announce_url:
+        torrent.trackers.append(announce_url)
+    torrent.path = content_path
+
+    logging.info(f"Creating {tracker_label} torrent file")
+    logging.info("Generating torrent file hash. This will take a long while...")
+    torrent.generate(callback=cb, interval=0.25)
+    logging.info("Writing torrent file to disk...")
+    torrent_path = os.path.join(run_dir, torrent_file_name)
+    torrent.write(torrent_path)
+    logging.info(f"{tracker_label} torrent file wrote to {torrent_file_name}")
+    return torrent_file_name
+
+
+def prepend_description(description: str, prefix: str | None = None) -> str:
+    if not prefix:
+        return description
+    prefix = prefix.strip()
+    if not prefix:
+        return description
+    return f"{prefix}\n\n{description}" if description else prefix
+
+
+def first_duplicate_group_id(duplicates):
+    for duplicate in duplicates or []:
+        if not isinstance(duplicate, dict):
+            continue
+        for key in ("groupId", "groupID", "groupid"):
+            group_id = duplicate.get(key)
+            if group_id:
+                return group_id
+    return None
+
+
+def tracker_response_indicates_existing(response_json) -> bool:
+    if not isinstance(response_json, dict):
+        return False
+    status = str(response_json.get("status", "")).lower()
+    if status == "success":
+        return False
+    parts = [
+        response_json.get("error"),
+        response_json.get("data"),
+        response_json.get("response"),
+    ]
+    text = " ".join(str(part) for part in parts if part).lower()
+    existing_terms = ("already", "exists", "duplicate", "dupe")
+    return any(term in text for term in existing_terms) and any(
+        term in text for term in ("torrent", "upload", "release")
+    )
+
+
+def scan_has_missing_md5(scan) -> bool:
+    return MD5_MISSING_BLOCKER in scan.blockers or any(track.md5_missing for track in scan.tracks)
+
+
+def _format_missing_md5_files(scan, limit: int = 5) -> str:
+    missing = [os.path.basename(track.path) for track in scan.tracks if track.md5_missing]
+    if not missing:
+        return "unknown FLAC file(s)"
+    suffix = f", and {len(missing) - limit} more" if len(missing) > limit else ""
+    return ", ".join(missing[:limit]) + suffix
+
+
+def fix_album_md5_signatures(path: str, skip_flac_check: bool = False):
+    if not skip_flac_check:
+        ensure_flac_cli()
+
+    logging.info("Fixing unset MD5 signatures...")
+    oldCwd = os.getcwd()
+    try:
+        if os.path.exists(os.path.join(path, 'Disc 1')):
+            for discPath in find_disc_folders(path):
+                fixMD5(discPath)
+                os.chdir(oldCwd)
+        else:
+            fixMD5(path)
+            os.chdir(oldCwd)
+    finally:
+        os.chdir(oldCwd)
+    logging.info("All FLAC MD5 signature fixes completed.")
 
 
 def main():
@@ -158,6 +258,13 @@ def main():
         action="store_true",
         default=False,
         help="Disables sending an album description to RED. Useful to not overwrite what's already there."
+    )
+    parser.add_argument(
+        "--desc",
+        action="store",
+        type=str,
+        default=None,
+        help="Text to prepend to the music torrent description, e.g. 'Sourced from Amazon Music'"
     )
     parser.add_argument(
         "--fixMD5",
@@ -285,9 +392,32 @@ def main():
     ops_group_ids_by_identity = {}
 
     for path in pathList:
-        scan = scan_album(path, media=arg.source, tags_override=arg.tags, cover_path=arg.cover, original_year=arg.ogyear)
+        def rescan_album():
+            return scan_album(path, media=arg.source, tags_override=arg.tags, cover_path=arg.cover, original_year=arg.ogyear)
+
+        scan = rescan_album()
         for warning in scan.warnings:
             logging.warning(f"{os.path.basename(path)}: {warning}")
+
+        if arg.fixMD5:
+            fix_album_md5_signatures(path, skip_flac_check=arg.skip_flac_check)
+            scan = rescan_album()
+        elif scan_has_missing_md5(scan):
+            logging.warning(
+                "Missing MD5 signatures found in detected FLAC file(s): "
+                f"{_format_missing_md5_files(scan)}"
+            )
+            prompt = "Missing MD5 signatures were found in one or more FLAC files. This is not allowed on many trackers. Would you like to fix them now?"
+            if getUserInput(prompt):
+                fix_album_md5_signatures(path, skip_flac_check=arg.skip_flac_check)
+                scan = rescan_album()
+                if scan_has_missing_md5(scan):
+                    logging.error("Missing MD5 signatures are still present after running the FLAC fixer. Skipping this album.")
+                    continue
+            else:
+                logging.warning("Skipping album due to missing MD5 signatures.")
+                continue
+
         if (arg.upload or arg.ops) and scan.blockers:
             logging.error(f"Preflight blockers for {path}: {pformat(scan.blockers)}")
             logging.error("Skipping this album. Use --preflight for the full readiness table.")
@@ -370,46 +500,6 @@ def main():
             continue
         logging.info("No missing tracks found.")
         
-        # --- Proactive MD5 Check ---
-        if not arg.fixMD5: 
-            logging.info("Scanning for missing MD5 signatures...")
-            if check_md5_signatures(path):
-                prompt = "Missing MD5 signatures were found in one or more FLAC files. This is not allowed on many trackers. Would you like to fix them now?"
-                if getUserInput(prompt):
-                    if not arg.skip_flac_check:
-                        ensure_flac_cli()
-                    
-                    logging.info("Fixing unset MD5 signatures as requested...")
-                    if len(discsArr) > 0:
-                        for discPath in discsArr:
-                            oldCwd = os.getcwd()
-                            fixMD5(discPath)
-                            os.chdir(oldCwd)
-                    else:
-                        oldCwd = os.getcwd()
-                        fixMD5(path)
-                        os.chdir(oldCwd)
-                    logging.info("All flac files fixed.")
-                else:
-                    logging.warning("Skipping album due to missing MD5 signatures.")
-                    continue
-            else:
-                logging.info("No missing MD5 signatures found.")
-
-        # Optional: Fix FLAC MD5 signatures (if explicitly requested)
-        if arg.fixMD5:
-            logging.info("Fixing any unset MD5 signatures...")
-            if len(discsArr) > 0:
-                for discPath in discsArr:
-                    oldCwd = os.getcwd()
-                    fixMD5(discPath)
-                    os.chdir(oldCwd)
-            else:
-                oldCwd = os.getcwd()
-                fixMD5(path)
-                os.chdir(oldCwd)
-            logging.info("All flac files fixed.")
-
         # Generate tracklist for description
         logging.info("Generating track list...")
         if len(discsArr) > 0:
@@ -435,7 +525,6 @@ def main():
             if not cover:
                 logging.error("Could not find or extract a cover image for this album.")
                 if getUserInput("A cover image is required for uploads. Do you want to provide a path to the cover image now?"):
-                    play_alert("input")
                     cover = input("Please enter the full path to the cover image:\n").strip().replace("\"", "")
                     if not os.path.exists(cover):
                         logging.error("The provided path does not exist. Exiting.")
@@ -458,39 +547,52 @@ def main():
                         logging.error("Exiting because cover image upload failed and is required.")
                         sys.exit(1)
 
-        # Create the .torrent file
-        logging.info("Creating torrent file")
-        torrent = torf.Torrent()
-        torrent.private = True
-        
-        # Add trackers based on user flags
-        if arg.upload:
-            torrent.trackers.append(red_announce_url)
-        if arg.ops:
-            torrent.trackers.append(ops_announce_url)
-
-        torrent.path = path
-        torrentFileName = os.path.basename(path).strip() + ".torrent"
+        # Create tracker-specific .torrent files. Private trackers must not share announce lists.
+        baseTorrentFileName = os.path.basename(path).strip() + ".torrent"
         head, tail = os.path.split(path)
         postName = os.path.basename(path)
+        torrentContentPath = path
         if head != seeding_dir:
             logging.info("Attempting to create hardlinks for easy seeding...")
             destination = os.path.join(seeding_dir, postName.strip())
             copy_folder_structure(path, destination)
             logging.info("Hardlinks created at " + destination)
-            torrent.path = destination
-        logging.info("Generating torrent file hash. This will take a long while...")
-        torrent.generate(callback=cb, interval=0.25)
-        logging.info("Writing torrent file to disk...")
-        torrent.write(runDir + torrentFileName)
-        logging.info("Torrent file wrote to " + torrentFileName)
+            torrentContentPath = destination
 
-        if arg.inject:
-            qbitInject(qbit_host, qbit_username, qbit_password, "music", runDir, torrentFileName, False, postName)
+        torrent_files = {}
+        if arg.upload:
+            red_torrent_name = tracker_torrent_filename(baseTorrentFileName, "RED")
+            torrent_files["red"] = create_torrent_file(
+                torrentContentPath, runDir, red_torrent_name, red_announce_url, "RED", "REDacted"
+            )
+        if arg.ops:
+            ops_torrent_name = tracker_torrent_filename(baseTorrentFileName, "OPS")
+            torrent_files["ops"] = create_torrent_file(
+                torrentContentPath, runDir, ops_torrent_name, ops_announce_url, "OPS", "Orpheus"
+            )
+        if not (arg.upload or arg.ops):
+            torrent_files["local"] = create_torrent_file(torrentContentPath, runDir, baseTorrentFileName)
 
-        if arg.sbcopy:
-            ftp_copy_folder(path, seedbox_host, seedbox_port, seedbox_ftp_user, seedbox_ftp_password, seedbox_remote_path)
-            qbitInject(seedbox_qbit_host, seedbox_qbit_user, seedbox_qbit_password, "music", runDir, torrentFileName, False, postName)
+        seedbox_copied = False
+
+        def inject_uploaded_torrent(torrent_file_name: str, tracker_label: str):
+            nonlocal seedbox_copied
+            if arg.inject:
+                logging.info(f"Injecting {tracker_label} torrent after successful upload...")
+                qbitInject(qbit_host, qbit_username, qbit_password, "music", runDir, torrent_file_name, False, postName)
+            if arg.sbcopy:
+                if not seedbox_copied:
+                    ftp_copy_folder(path, seedbox_host, seedbox_port, seedbox_ftp_user, seedbox_ftp_password, seedbox_remote_path)
+                    seedbox_copied = True
+                logging.info(f"Injecting {tracker_label} torrent to seedbox after successful upload...")
+                qbitInject(seedbox_qbit_host, seedbox_qbit_user, seedbox_qbit_password, "music", runDir, torrent_file_name, False, postName)
+
+        if not (arg.upload or arg.ops):
+            if arg.inject:
+                qbitInject(qbit_host, qbit_username, qbit_password, "music", runDir, torrent_files["local"], False, postName)
+            if arg.sbcopy:
+                ftp_copy_folder(path, seedbox_host, seedbox_port, seedbox_ftp_user, seedbox_ftp_password, seedbox_remote_path)
+                qbitInject(seedbox_qbit_host, seedbox_qbit_user, seedbox_qbit_password, "music", runDir, torrent_files["local"], False, postName)
 
         # --- Prepare common metadata for uploads ---
         if arg.upload or arg.ops:
@@ -510,38 +612,53 @@ def main():
                     logging.info("Album identity matches a previous REDacted upload. Using the same REDacted group ID...")
                     redGroupId_to_use = red_group_ids_by_identity[upload_metadata.identity_key]
 
-                warn_tracker_duplicates("red", red_api, upload_metadata)
-
-                response_red = upload_to_red(runDir=runDir,
-                                             torrent_file=os.path.join(runDir, torrentFileName),
-                                             artists=upload_metadata.artist, title=upload_metadata.title, year=upload_metadata.year,
-                                             ogyear=None, releasetype=upload_metadata.release_type,
-                                             audioFormat=upload_metadata.audio_format, bitrate=upload_metadata.bitrate, media=upload_metadata.media,
-                                             tags=upload_metadata.tags, recordLabel=upload_metadata.record_label, image=upload_metadata.image,
-                                             api=red_api, releaseGroup=releaseGroupID,
-                                             redGroupId=redGroupId_to_use, noDesc=arg.nodesc,
-                                             skipPrompts=arg.skipPrompts,
-                                             dry_run=not arg.skip_red_dryrun,
-                                             edition_year=upload_metadata.edition_year)
-                if response_red:
-                    try:
-                        response_json = response_red.json()
-                        if response_red.status_code == 200 and response_json.get('status') == 'success':
-                            lastGroupID = response_json['response']['groupid']
-                            red_group_ids_by_identity[upload_metadata.identity_key] = lastGroupID
-                            red_upload_succeeded = True
-                            logging.info(f"Saved new REDacted Group ID: {lastGroupID}")
-                        else:
-                            logging.error(f"REDacted API returned an error: {response_json.get('error', 'Unknown error')}")
-                    except json.JSONDecodeError:
-                        logging.error("Failed to decode JSON from REDacted response. The site may be down or returned an error page.")
-                        logging.error(f"Response Text: {response_red.text}")
+                red_duplicates = warn_tracker_duplicates("red", red_api, upload_metadata)
+                existing_red_group_id = first_duplicate_group_id(red_duplicates)
+                if red_duplicates:
+                    red_upload_succeeded = True
+                    if existing_red_group_id:
+                        red_group_ids_by_identity[upload_metadata.identity_key] = existing_red_group_id
+                    logging.info(
+                        "Matching REDacted upload already exists. Treating REDacted as complete; "
+                        f"Group ID: {existing_red_group_id or 'unknown'}"
+                    )
+                else:
+                    response_red = upload_to_red(runDir=runDir,
+                                                 torrent_file=os.path.join(runDir, torrent_files["red"]),
+                                                 artists=upload_metadata.artist, title=upload_metadata.title, year=upload_metadata.year,
+                                                 ogyear=None, releasetype=upload_metadata.release_type,
+                                                 audioFormat=upload_metadata.audio_format, bitrate=upload_metadata.bitrate, media=upload_metadata.media,
+                                                 tags=upload_metadata.tags, recordLabel=upload_metadata.record_label, image=upload_metadata.image,
+                                                 api=red_api, releaseGroup=releaseGroupID,
+                                                 redGroupId=redGroupId_to_use, noDesc=arg.nodesc,
+                                                 skipPrompts=arg.skipPrompts,
+                                                 dry_run=not arg.skip_red_dryrun,
+                                                 edition_year=upload_metadata.edition_year,
+                                                 desc_prefix=arg.desc)
+                    if response_red:
+                        try:
+                            response_json = response_red.json()
+                            if response_red.status_code == 200 and response_json.get('status') == 'success':
+                                response_data = response_json['response']
+                                lastGroupID = response_data['groupid']
+                                red_torrent_id = response_data.get('torrentid') or response_data.get('torrentId')
+                                red_group_ids_by_identity[upload_metadata.identity_key] = lastGroupID
+                                red_upload_succeeded = True
+                                logging.info(f"REDacted upload succeeded. Torrent ID: {red_torrent_id or 'unknown'}; Group ID: {lastGroupID}")
+                                inject_uploaded_torrent(torrent_files["red"], "REDacted")
+                            elif tracker_response_indicates_existing(response_json):
+                                red_upload_succeeded = True
+                                logging.info("REDacted reports this upload already exists. Treating REDacted as complete.")
+                            else:
+                                logging.error(f"REDacted API returned an error: {response_json.get('error', 'Unknown error')}")
+                        except json.JSONDecodeError:
+                            logging.error("Failed to decode JSON from REDacted response. The site may be down or returned an error page.")
+                            logging.error(f"Response Text: {response_red.text}")
                 
             # --- Upload to Orpheus ---
             if arg.ops:
                 if arg.upload and not red_upload_succeeded:
-                    logging.error("Skipping Orpheus upload because REDacted did not complete successfully.")
-                    continue
+                    logging.warning("REDacted upload did not complete successfully; continuing with separate Orpheus torrent.")
                 logging.info("Attempting to upload to Orpheus...")
                 opsGroupId_to_use = arg.ops_groupid
                 if not opsGroupId_to_use and upload_metadata.identity_key in ops_group_ids_by_identity:
@@ -551,7 +668,7 @@ def main():
                 warn_tracker_duplicates("ops", ops_api, upload_metadata)
 
                 response_ops = upload_to_orpheus(runDir=runDir,
-                                   torrent_file=os.path.join(runDir, torrentFileName),
+                                   torrent_file=os.path.join(runDir, torrent_files["ops"]),
                                    artists=upload_metadata.artist, title=upload_metadata.title, year=upload_metadata.year,
                                    releasetype=upload_metadata.release_type, audioFormat=upload_metadata.audio_format,
                                    bitrate=upload_metadata.bitrate, media=upload_metadata.media, tags=upload_metadata.tags,
@@ -559,7 +676,8 @@ def main():
                                    recordLabel=upload_metadata.record_label,
                                    remaster_year=upload_metadata.edition_year,
                                    opsGroupId=opsGroupId_to_use,
-                                   skipPrompts=arg.skipPrompts)
+                                   skipPrompts=arg.skipPrompts,
+                                   desc_prefix=arg.desc)
                 if response_ops:
                     try:
                         response_json = response_ops.json()
@@ -567,6 +685,7 @@ def main():
                             lastOpsGroupID = response_json['response']['groupId']
                             ops_group_ids_by_identity[upload_metadata.identity_key] = lastOpsGroupID
                             logging.info(f"Saved new Orpheus Group ID: {lastOpsGroupID}")
+                            inject_uploaded_torrent(torrent_files["ops"], "Orpheus")
                         else:
                             logging.error(f"Orpheus API returned an error: {response_json.get('error', 'Unknown error')}")
                     except json.JSONDecodeError:
@@ -591,7 +710,7 @@ def search_tracker_duplicates(tracker: str, api: str, metadata: MusicUploadMetad
     if tracker == "ops":
         url = "https://orpheus.network/ajax.php?action=browse"
     else:
-        url = "https://redacted.ch/ajax.php?action=browse"
+        url = f"{RED_BASE_URL}/ajax.php?action=browse"
     params = {
         "artistname": metadata.artist,
         "groupname": metadata.title,
@@ -626,6 +745,7 @@ def warn_tracker_duplicates(tracker: str, api: str, metadata: MusicUploadMetadat
             f"{tracker.upper()} browse found {len(duplicates)} likely duplicate result(s) for "
             f"{metadata.artist} - {metadata.title} ({metadata.year}) {metadata.audio_format} {metadata.bitrate} {metadata.media}."
         )
+    return duplicates
 
 
 def _has_audio_files(path: str, recursive: bool = False) -> bool:
@@ -691,13 +811,14 @@ def check_md5_signatures(directory):
     
     return missing_md5
 
-def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, redGroupId=None, ogyear=None, noDesc=False, skipPrompts=False, dry_run=True, edition_year=None):
+def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, redGroupId=None, ogyear=None, noDesc=False, skipPrompts=False, dry_run=True, edition_year=None, desc_prefix=None):
     """Constructs and sends the upload request to the REDacted API."""
-    url = "https://redacted.ch/ajax.php?action=upload"
+    url = f"{RED_BASE_URL}/ajax.php?action=upload"
 
     with open(os.path.join(runDir, "trackData.txt"), 'r', encoding='UTF-8') as _td:
         albumDesc = _td.read()
     albumDesc = albumDesc.replace('\u2008', ' ')
+    albumDesc = prepend_description(albumDesc, desc_prefix)
     if releaseGroup:
         musicBrainzURL = "https://musicbrainz.org/release-group/" + releaseGroup
         albumDesc = albumDesc + "\n\n\n" + f"[url={musicBrainzURL}]MusicBrainz Release Group[/url]"
@@ -732,7 +853,6 @@ def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, 
 
     if recordLabel:
         if len(recordLabel) < 2 or len(recordLabel) > 80:
-            play_alert("input")
             recordLabel = input("Gotten record label too long or too short for RED\nGotten label: " + recordLabel + "\nPlease input a record label:\n")
         first_artist = artists.split(',')[0].strip()
         if 'records dk' in recordLabel.lower() or first_artist.lower() == recordLabel.lower():
@@ -759,7 +879,10 @@ def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, 
                 except json.JSONDecodeError:
                     logging.error(f"REDacted dry-run did not return JSON: {dryrun_response.text}")
                     return None
-                if dryrun_json.get('status') != 'success':
+                if dryrun_json.get('status') not in ('success', 'dry run success'):
+                    if tracker_response_indicates_existing(dryrun_json):
+                        logging.info("REDacted dry-run reports this upload already exists.")
+                        return dryrun_response
                     logging.error(f"REDacted dry-run failed: {dryrun_json.get('error', 'Unknown error')}")
                     logging.error(f"Response content: {dryrun_response.text}")
                     return None
@@ -772,13 +895,18 @@ def upload_to_red(runDir, releaseGroup, torrent_file, artists: str, title: str, 
             return response
         except requests.exceptions.RequestException as e:
             logging.error(f"Failed to upload to REDacted: {e}")
-            if 'response' in locals() and response:
+            error_response = getattr(e, "response", None)
+            if error_response is not None:
+                logging.error(f"Response content: {error_response.text}")
+            elif 'dryrun_response' in locals() and dryrun_response:
+                logging.error(f"Dry-run response content: {dryrun_response.text}")
+            elif 'response' in locals() and response:
                 logging.error(f"Response content: {response.text}")
             return None
     else:
         return None
 
-def upload_to_orpheus(runDir, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, remaster_year=None, opsGroupId=None, skipPrompts=False):
+def upload_to_orpheus(runDir, torrent_file, artists: str, title: str, year, releasetype, audioFormat, bitrate, media, tags, image, api, recordLabel=None, remaster_year=None, opsGroupId=None, skipPrompts=False, desc_prefix=None):
     """Constructs and sends the upload request to the Orpheus API."""
     
     upload_url = "https://orpheus.network/ajax.php?action=upload"
@@ -786,6 +914,7 @@ def upload_to_orpheus(runDir, torrent_file, artists: str, title: str, year, rele
 
     with open(os.path.join(runDir, "trackData.txt"), 'r', encoding='UTF-8') as _td:
         albumDesc = _td.read()
+    albumDesc = prepend_description(albumDesc.replace('\u2008', ' '), desc_prefix)
 
     metadata = MusicUploadMetadata(
         artist=artists,
@@ -816,12 +945,13 @@ def upload_to_orpheus(runDir, torrent_file, artists: str, title: str, year, rele
                 files = {'file_input': torrent_f}
                 response = requests.post(url=upload_url, headers=headers, data=data, files=files, timeout=30)
             response.raise_for_status()
-            logging.info("Successfully uploaded to Orpheus.")
-            pprint(response.json())
             return response
         except requests.exceptions.RequestException as e:
             logging.error(f"Failed to upload to Orpheus: {e}")
-            if 'response' in locals() and response:
+            error_response = getattr(e, "response", None)
+            if error_response is not None:
+                logging.error(f"Response content: {error_response.text}")
+            elif 'response' in locals() and response:
                 logging.error(f"Response content: {response.text}")
             return None
     else:
@@ -912,7 +1042,7 @@ def process_string(input_string):
     return output_string
 
 def download_torrent(runDir, torrent_id, api_key):
-    url = 'https://redacted.ch/ajax.php?action=download'
+    url = f"{RED_BASE_URL}/ajax.php?action=download"
     headers = {'Authorization': api_key}
     params = {'id': torrent_id}
     response = requests.get(url, params=params, headers=headers)
@@ -951,7 +1081,6 @@ def get_release_year(path):
     if release_year is None:
         logging.error("No release year found in any file. Please check the metadata.")
         print_all_metadata_path(path) # Print metadata for debugging
-        play_alert("input")
         release_year = int(input("Please enter the 4-digit release year manually:\n"))
     return release_year
 
@@ -969,7 +1098,6 @@ def get_genre(path):
         genre = genre.replace('Bandes originales de films', 'Stage and Screen')
     except (KeyError, NameError):
         logging.error("No genre found, please give genres comma separated")
-        play_alert("input")
         genre = input()
     return genre.lower()
 

@@ -72,6 +72,21 @@ class TestScanAlbum:
         assert scan.metadata.tags == "pop"
         assert scan.metadata.record_label == "Self-Released"
 
+    def test_scan_flags_missing_flac_md5_for_prompt(self, tmp_path, monkeypatch):
+        import musicTorrentMaker
+        from torrent_utils import music_upload
+
+        album = _write_album(tmp_path, ["01.flac"])
+        tags = {"01.flac": _easy(1, 1)}
+        tech = {"01.flac": _tech("FLAC", md5=b"")}
+        monkeypatch.setattr(music_upload.mutagen, "File", _fake_mutagen_factory(tags, tech))
+
+        scan = music_upload.scan_album(str(album), media="WEB")
+
+        assert musicTorrentMaker.scan_has_missing_md5(scan)
+        assert "one or more FLAC files have missing MD5 signatures" in scan.blockers
+        assert scan.tracks[0].md5_missing
+
     def test_missing_genre_blocks_upload_readiness(self, tmp_path, monkeypatch):
         from torrent_utils import music_upload
 
@@ -172,6 +187,18 @@ class TestPayloadBuilders:
         assert _payload_values(payload, "importance[]") == [1, 1]
         assert _payload_values(payload, "tags") == ["pop, dance, 2020s"]
 
+    def test_red_payload_pairs_record_label_with_release_year_when_no_edition_year(self):
+        from dataclasses import replace
+        from torrent_utils.music_upload import build_red_payload
+
+        metadata = replace(self._metadata(), edition_year=None)
+
+        payload = build_red_payload(metadata, "tracks")
+
+        assert ("year", 2025) in payload
+        assert ("remaster_year", 2025) in payload
+        assert ("remaster_record_label", "Self-Released") in payload
+
     def test_ops_payload_uses_initial_year_and_edition_year(self):
         from torrent_utils.music_upload import build_ops_payload
 
@@ -182,7 +209,22 @@ class TestPayloadBuilders:
         assert ("remaster", 1) in payload
         assert ("remaster_year", 2026) in payload
         assert ("record_label", "Self-Released") in payload
+        assert ("remaster_record_label", "Self-Released") in payload
         assert _payload_values(payload, "artists[]") == ["D'Leesa", "Guest"]
+
+    def test_ops_payload_pairs_record_label_with_release_year_when_no_edition_year(self):
+        from dataclasses import replace
+        from torrent_utils.music_upload import build_ops_payload
+
+        metadata = replace(self._metadata(), edition_year=None)
+
+        payload = build_ops_payload(metadata, "tracks")
+
+        assert ("year", 2025) in payload
+        assert ("remaster", 1) in payload
+        assert ("remaster_year", 2025) in payload
+        assert ("record_label", "Self-Released") in payload
+        assert ("remaster_record_label", "Self-Released") in payload
 
     def test_missing_image_fails_payload_build(self):
         from torrent_utils.music_upload import build_red_payload
@@ -203,6 +245,70 @@ class TestPayloadBuilders:
 
 
 class TestRedUploadRunner:
+    def test_first_duplicate_group_id_reads_red_browse_keys(self):
+        import musicTorrentMaker
+
+        assert musicTorrentMaker.first_duplicate_group_id([{"groupId": 123}]) == 123
+        assert musicTorrentMaker.first_duplicate_group_id([{"groupID": "456"}]) == "456"
+        assert musicTorrentMaker.first_duplicate_group_id([{"torrentId": 789}]) is None
+
+    def test_tracker_response_indicates_existing_upload(self):
+        import musicTorrentMaker
+
+        assert musicTorrentMaker.tracker_response_indicates_existing({
+            "status": "failure",
+            "error": "This torrent already exists.",
+        })
+        assert not musicTorrentMaker.tracker_response_indicates_existing({
+            "status": "failure",
+            "error": "Year of remaster/re-issue must be entered.",
+        })
+
+    def test_format_missing_md5_files_limits_output(self):
+        import musicTorrentMaker
+
+        tracks = [
+            SimpleNamespace(path=f"C:/Music/{idx:02d}.flac", md5_missing=True)
+            for idx in range(1, 8)
+        ]
+        scan = SimpleNamespace(tracks=tracks)
+
+        assert musicTorrentMaker._format_missing_md5_files(scan) == (
+            "01.flac, 02.flac, 03.flac, 04.flac, 05.flac, and 2 more"
+        )
+
+    def test_prepend_description_adds_prefix_with_blank_line(self):
+        import musicTorrentMaker
+
+        assert musicTorrentMaker.prepend_description("01. Track", "Sourced from Amazon Music") == "Sourced from Amazon Music\n\n01. Track"
+        assert musicTorrentMaker.prepend_description("01. Track", "  ") == "01. Track"
+
+    def test_create_tracker_torrent_file_writes_single_announce_and_source(self, tmp_path):
+        import torf
+        import musicTorrentMaker
+
+        album = tmp_path / "Album"
+        run_dir = tmp_path / "run"
+        album.mkdir()
+        run_dir.mkdir()
+        (album / "01.flac").write_bytes(b"audio")
+
+        torrent_name = musicTorrentMaker.tracker_torrent_filename("Album.torrent", "RED")
+        written_name = musicTorrentMaker.create_torrent_file(
+            str(album),
+            str(run_dir),
+            torrent_name,
+            "https://flacsfor.me/passkey/announce",
+            "RED",
+            "REDacted",
+        )
+
+        torrent = torf.Torrent.read(str(run_dir / written_name))
+        assert written_name == "Album [RED].torrent"
+        assert torrent.trackers == [["https://flacsfor.me/passkey/announce"]]
+        assert torrent.source == "RED"
+        assert torrent.private is True
+
     def test_red_upload_runs_dryrun_before_real_upload(self, tmp_path):
         import musicTorrentMaker
 
@@ -214,7 +320,7 @@ class TestRedUploadRunner:
 
         dryrun_response = MagicMock()
         dryrun_response.raise_for_status.return_value = None
-        dryrun_response.json.return_value = {"status": "success", "response": {}}
+        dryrun_response.json.return_value = {"status": "dry run success", "data": {}}
         real_response = MagicMock()
         real_response.raise_for_status.return_value = None
         real_response.json.return_value = {"status": "success", "response": {"groupid": 123}}
@@ -237,12 +343,91 @@ class TestRedUploadRunner:
                 recordLabel="Self-Released",
                 skipPrompts=True,
                 dry_run=True,
+                desc_prefix="Sourced from Amazon Music",
             )
 
         assert response is real_response
         assert post.call_count == 2
+        assert post.call_args_list[0].kwargs["url"] == "https://redacted.sh/ajax.php?action=upload"
+        assert post.call_args_list[1].kwargs["url"] == "https://redacted.sh/ajax.php?action=upload"
         assert ("dryrun", 1) in post.call_args_list[0].kwargs["data"]
         assert ("dryrun", 1) not in post.call_args_list[1].kwargs["data"]
+        assert ("album_desc", "Sourced from Amazon Music\n\ntracks") in post.call_args_list[1].kwargs["data"]
+
+    def test_red_upload_treats_dryrun_existing_as_complete(self, tmp_path):
+        import musicTorrentMaker
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "trackData.txt").write_text("tracks", encoding="utf-8")
+        torrent_file = run_dir / "album.torrent"
+        torrent_file.write_bytes(b"torrent")
+
+        dryrun_response = MagicMock()
+        dryrun_response.raise_for_status.return_value = None
+        dryrun_response.status_code = 200
+        dryrun_response.json.return_value = {
+            "status": "failure",
+            "error": "This torrent already exists.",
+        }
+
+        with patch("musicTorrentMaker.requests.post", return_value=dryrun_response) as post:
+            response = musicTorrentMaker.upload_to_red(
+                runDir=str(run_dir),
+                releaseGroup=None,
+                torrent_file=str(torrent_file),
+                artists="D'Leesa",
+                title="Desire",
+                year=2025,
+                releasetype="Album",
+                audioFormat="MP3",
+                bitrate="320",
+                media="WEB",
+                tags="pop",
+                image="https://ptpimg.me/cover.jpg",
+                api="red-api",
+                recordLabel="Self-Released",
+                skipPrompts=True,
+                dry_run=True,
+            )
+
+        assert response is dryrun_response
+        assert post.call_count == 1
+
+    def test_ops_upload_prepends_description(self, tmp_path):
+        import musicTorrentMaker
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "trackData.txt").write_text("tracks", encoding="utf-8")
+        torrent_file = run_dir / "album.torrent"
+        torrent_file.write_bytes(b"torrent")
+
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"status": "success", "response": {"groupId": 456}}
+
+        with patch("musicTorrentMaker.requests.post", return_value=response) as post:
+            result = musicTorrentMaker.upload_to_orpheus(
+                runDir=str(run_dir),
+                torrent_file=str(torrent_file),
+                artists="D'Leesa",
+                title="Desire",
+                year=2025,
+                releasetype="Album",
+                audioFormat="MP3",
+                bitrate="320",
+                media="WEB",
+                tags="pop",
+                image="https://ptpimg.me/cover.jpg",
+                api="ops-api",
+                recordLabel="Self-Released",
+                skipPrompts=True,
+                desc_prefix="Sourced from Amazon Music",
+            )
+
+        assert result is response
+        assert ("album_desc", "Sourced from Amazon Music\n\ntracks") in post.call_args.kwargs["data"]
 
 
 class TestMusicCliHelpers:
@@ -284,5 +469,7 @@ class TestMusicCliHelpers:
         response.raise_for_status.return_value = None
         response.json.return_value = {"status": "success", "response": {"results": [{"groupId": 1}]}}
 
-        with patch("musicTorrentMaker.requests.get", return_value=response):
+        with patch("musicTorrentMaker.requests.get", return_value=response) as get:
             assert musicTorrentMaker.search_tracker_duplicates("red", "api", metadata) == [{"groupId": 1}]
+
+        assert get.call_args.args[0] == "https://redacted.sh/ajax.php?action=browse"

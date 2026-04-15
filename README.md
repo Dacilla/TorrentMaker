@@ -85,6 +85,7 @@ Options:
   --sbcopy                  Copy to seedbox and inject into seedbox qBittorrent
   -u, --upload              Upload to REDacted
   --ops                     Upload to Orpheus (OPS)
+  --desc TEXT               Prepend text to the music torrent description
   -f, --format              Rename track files to standard format
   --nodesc                  Don't overwrite existing album description on RED
   --fixMD5                  Fix unset MD5 signatures in FLAC files

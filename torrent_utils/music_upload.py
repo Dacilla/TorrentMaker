@@ -473,10 +473,11 @@ def build_red_payload(
         payload.append(("album_desc", album_desc))
     if group_id:
         payload.append(("groupid", group_id))
-    if metadata.edition_year:
-        payload.append(("remaster_year", metadata.edition_year))
     if metadata.record_label:
+        payload.append(("remaster_year", metadata.edition_year or metadata.year))
         payload.append(("remaster_record_label", metadata.record_label))
+    elif metadata.edition_year:
+        payload.append(("remaster_year", metadata.edition_year))
     payload.extend(_artist_fields(metadata.artist))
     return payload
 
@@ -508,7 +509,12 @@ def build_ops_payload(
         payload.append(("groupid", group_id))
     if metadata.record_label:
         payload.append(("record_label", metadata.record_label))
-    if metadata.edition_year:
+        payload.extend((
+            ("remaster", 1),
+            ("remaster_year", metadata.edition_year or metadata.year),
+            ("remaster_record_label", metadata.record_label),
+        ))
+    elif metadata.edition_year:
         payload.extend((("remaster", 1), ("remaster_year", metadata.edition_year)))
     payload.extend(_artist_fields(metadata.artist))
     return payload

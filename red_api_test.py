@@ -6,7 +6,7 @@ from pprint import pprint
 
 # --- Configuration ---
 SETTINGS_FILE = 'settings.ini'
-API_URL = "https://redacted.ch/ajax.php?action=top10"
+API_URL = "https://redacted.sh/ajax.php?action=top10"
 
 def main():
     """
