@@ -27,8 +27,9 @@ class TestGetHunoTypeId:
     def test_web_dl_h265(self):
         assert self._call("WEB-DL", "H265") == 3
 
-    def test_web_dl_av1(self):
-        assert self._call("WEB-DL", "AV1") == 3
+    def test_web_dl_av1_initially_classifies_as_encode(self):
+        # Main upload flow prompts the user to clarify direct WEB vs WEB encode.
+        assert self._call("WEB-DL", "AV1") == 15
 
     # ENCODE cases
     def test_bluray_x265_encode(self):

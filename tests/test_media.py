@@ -85,7 +85,8 @@ class TestGetResolution:
 
     def test_no_video_track(self):
         f = _make_media_file(media_info=_make_media_info())
-        assert f.get_resolution() == "Unknown"
+        with pytest.raises(RuntimeError, match="No video track found"):
+            f.get_resolution()
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +131,8 @@ class TestGetVideoCodec:
 
     def test_no_video_track(self):
         f = _make_media_file(media_info=_make_media_info())
-        assert f.get_video_codec("WEB-DL") == "H264"
+        with pytest.raises(RuntimeError, match="No video track found"):
+            f.get_video_codec("WEB-DL")
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +205,7 @@ class TestGetAudioInfo:
 
     def test_no_audio_track(self):
         f = _make_media_file(media_info=_make_media_info())
-        assert f.get_audio_info() == ""
+        assert f.get_audio_info() == "NONE 0.0"
 
 
 # ---------------------------------------------------------------------------
