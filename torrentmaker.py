@@ -758,11 +758,7 @@ def main():
 
             prev_desc_path = os.path.join(prev_run, "showDesc.txt")
             if os.path.exists(prev_desc_path):
-                try:
-                    with open(prev_desc_path, encoding='utf-8') as _df:
-                        has_links = '[img]' in _df.read()
-                except OSError:
-                    pass
+                has_links = bool(extract_screenshot_bbcodes(prev_desc_path))
 
             ss_label = (f"{prev_screenshot_count}/8 screenshots (incomplete)"
                         if has_screenshots and prev_screenshot_count < 8
@@ -1001,6 +997,7 @@ def main():
     # --- Screenshot and Upload Logic ---
     screenshot_success = False
     encode_timestamps = []
+    bbcodes = []
     encode_bbcodes = None
     source_bbcodes = None
     comparison_url = None
@@ -1052,12 +1049,12 @@ def main():
             sys.exit(1)
 
     if reusing and has_links:
-        with open(os.path.join(prev_run, "showDesc.txt"), encoding='utf-8') as _df:
-            screenshot_lines = [line for line in _df if '[img]' in line]
-        if screenshot_lines:
+        bbcodes = extract_screenshot_bbcodes(os.path.join(prev_run, "showDesc.txt"))
+        if bbcodes:
             with open(os.path.join(runDir, "showDesc.txt"), 'w', encoding='utf-8') as _df:
-                _df.writelines(screenshot_lines)
-            logging.info(f"Reused {len(screenshot_lines)} image link(s) from {os.path.relpath(prev_run)}.")
+                for bbcode in bbcodes:
+                    _df.write(f"[center]{bbcode}[/center]\n")
+            logging.info(f"Reused {len(bbcodes)} image link(s) from {os.path.relpath(prev_run)}.")
     elif arg.upload and screenshot_success:
         bbcodes = upload_screenshots_concurrently(
             screenshot_dir=os.path.join(runDir, "screenshots"),
@@ -1461,6 +1458,32 @@ def main():
         category = "HUNO" if arg.huno else ""
         paused = not arg.huno
         qbitInject(qbit_host=qbit_host, qbit_username=qbit_username, qbit_password=qbit_password, category=category, runDir=runDir, torrentFileName=torrentFileName, paused=paused, postName=postName)
+
+def extract_screenshot_bbcodes(desc_path):
+    """Return image BBCode entries from a saved description's Screens section."""
+    try:
+        with open(desc_path, encoding='utf-8') as desc_file:
+            lines = desc_file.readlines()
+    except OSError:
+        return []
+
+    has_screens_header = any('[b]screens[/b]' in line.lower() for line in lines)
+    in_screens = not has_screens_header
+    bbcodes = []
+    image_pattern = re.compile(r'(\[url=[^\]]+\]\[img\].*?\[/img\]\[/url\]|\[img\].*?\[/img\])', re.IGNORECASE)
+
+    for line in lines:
+        if '[b]screens[/b]' in line.lower():
+            in_screens = True
+            continue
+        if not in_screens or '[img]' not in line.lower():
+            continue
+        match = image_pattern.search(line.strip())
+        if match:
+            bbcodes.append(match.group(1))
+
+    return bbcodes
+
 
 def generate_bbcode(tmdb_id, mediaDesc, runDir, api_key, isMovie, notes=None, comparison_url=None, comparison_bbcodes=None):
     prominent_color = get_prominent_color(tmdb_id, api_key, runDir, isMovie)
