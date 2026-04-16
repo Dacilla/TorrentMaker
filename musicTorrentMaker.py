@@ -29,7 +29,7 @@ from tqdm import tqdm
 from concurrent import futures
 
 from torrent_utils.helpers import (
-    has_folders, cb, uploadToPTPIMG, copy_folder_structure,
+    has_folders, make_torrent_progress_callback, uploadToPTPIMG, copy_folder_structure,
     getUserInput as _getUserInput, qbitInject, similarity, get_path_list, ensure_flac_cli,
 )
 from torrent_utils.config_loader import load_settings, validate_settings
@@ -74,7 +74,7 @@ def create_torrent_file(content_path: str, run_dir: str, torrent_file_name: str,
 
     logging.info(f"Creating {tracker_label} torrent file")
     logging.info("Generating torrent file hash. This will take a long while...")
-    torrent.generate(callback=cb, interval=0.25)
+    torrent.generate(callback=make_torrent_progress_callback(), interval=0.25)
     logging.info("Writing torrent file to disk...")
     torrent_path = os.path.join(run_dir, torrent_file_name)
     torrent.write(torrent_path)

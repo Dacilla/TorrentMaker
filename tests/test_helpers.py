@@ -84,6 +84,26 @@ class TestPromptAlerts:
 
         beep.assert_not_called()
 
+    def test_torrent_done_alert_skips_fast_generation(self):
+        from torrent_utils import helpers
+
+        with patch("torrent_utils.helpers.time.monotonic", side_effect=[100.0, 109.9]), \
+             patch("torrent_utils.helpers.play_alert") as alert:
+            callback = helpers.make_torrent_progress_callback()
+            callback(None, None, 1, 1)
+
+        alert.assert_not_called()
+
+    def test_torrent_done_alert_plays_after_threshold(self):
+        from torrent_utils import helpers
+
+        with patch("torrent_utils.helpers.time.monotonic", side_effect=[100.0, 110.1]), \
+             patch("torrent_utils.helpers.play_alert") as alert:
+            callback = helpers.make_torrent_progress_callback()
+            callback(None, None, 1, 1)
+
+        alert.assert_called_once_with("done")
+
 
 # ---------------------------------------------------------------------------
 # get_season / get_episode

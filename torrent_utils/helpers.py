@@ -372,6 +372,7 @@ def getInfoDump(filePath: str, runDir: str, filename: str = DUMPFILE):
 
 
 _last_alert_time = 0.0
+TORRENT_DONE_ALERT_SECONDS = 10.0
 
 def _alerts_disabled() -> bool:
     return (
@@ -411,6 +412,21 @@ def play_alert(kind: str = "input"):
             winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
     except Exception:
         pass
+
+
+def make_torrent_progress_callback(alert_after_seconds: float = TORRENT_DONE_ALERT_SECONDS):
+    started_at = time.monotonic()
+
+    def progress_callback(torrent, filepath, pieces_done, pieces_total):
+        if pieces_total:
+            print(f'{pieces_done/pieces_total*100:3.0f} % done', end="\r")
+        else:
+            print('  0 % done', end="\r")
+
+        if pieces_done == pieces_total and time.monotonic() - started_at > alert_after_seconds:
+            play_alert("done")
+
+    return progress_callback
 
 
 def getUserInput(question: str, alert: bool = True):
@@ -457,9 +473,10 @@ def folders_in(path_to_parent):
             yield os.path.join(path_to_parent, fname)
 
 def cb(torrent, filepath, pieces_done, pieces_total):
-    print(f'{pieces_done/pieces_total*100:3.0f} % done', end="\r")
-    if pieces_done == pieces_total:
-        play_alert("done")
+    if pieces_total:
+        print(f'{pieces_done/pieces_total*100:3.0f} % done', end="\r")
+    else:
+        print('  0 % done', end="\r")
 
 def uploadToPTPIMG(imageFile: str, api_key: str):
     """Uploads an image to PTPImg with robust error handling."""

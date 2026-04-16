@@ -31,7 +31,7 @@ from colorthief import ColorThief
 from torrent_utils.config_loader import load_settings, validate_settings
 from torrent_utils.HUNOInfo import bannedEncoders, encoderGroups
 from torrent_utils.helpers import (
-    getInfoDump, getUserInput, has_folders, cb, uploadToPTPIMG,
+    getInfoDump, getUserInput, has_folders, make_torrent_progress_callback, uploadToPTPIMG,
     copy_folder_structure, qbitInject, FileOrFolder, is_valid_torf_hash,
     convert_sha1_hash, ensure_mediainfo_cli, upload_to_catbox, upload_to_imgbb,
     upload_to_onlyimage, upload_to_hawkepics, play_alert, upload_to_slowpics
@@ -1159,7 +1159,7 @@ def main():
                 torrent.path = destination
 
         logging.info("Generating torrent file hash. This will take a long while...")
-        torrent.generate(callback=cb, interval=0.25)
+        torrent.generate(callback=make_torrent_progress_callback(), interval=0.25)
         torrent.write(os.path.join(runDir, torrentFileName))
         logging.info(f"Torrent file wrote to {torrentFileName}")
     

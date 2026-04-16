@@ -345,25 +345,29 @@ def ensure_album_cover(
             print(f"Failed to write embedded cover for {source_audio_path}: {exc}", file=sys.stderr)
 
 
-def cleanup_empty_dirs(root: Path) -> None:
-    all_dirs = sorted(
-        [p for p in root.rglob("*") if p.is_dir()],
-        key=lambda p: len(p.parts),
-        reverse=True,
-    )
-    for directory in all_dirs:
-        try:
-            next(directory.iterdir())
-        except StopIteration:
+def cleanup_empty_source_dirs(root: Path, source_dirs: set[Path]) -> None:
+    for source_dir in sorted(source_dirs, key=lambda p: len(p.parts), reverse=True):
+        directory = source_dir
+
+        while directory != root:
+            try:
+                directory.resolve().relative_to(root)
+            except (OSError, ValueError):
+                break
+
             try:
                 directory.rmdir()
+            except FileNotFoundError:
+                directory = directory.parent
+                continue
             except OSError:
-                pass
-        except OSError:
-            pass
+                break
+
+            print(f"Removed empty folder: {directory}")
+            directory = directory.parent
 
 
-def organise_music(root: Path, dry_run: bool, copy_only: bool, remove_empty_dirs: bool) -> None:
+def organise_music(root: Path, dry_run: bool, copy_only: bool, remove_empty_dirs: bool = True) -> None:
     files = [
         p for p in root.rglob("*")
         if p.is_file() and p.suffix.lower() in SUPPORTED_AUDIO_EXTENSIONS
@@ -376,6 +380,7 @@ def organise_music(root: Path, dry_run: bool, copy_only: bool, remove_empty_dirs
     print(f"Found {len(files)} music files.\n")
 
     moved_destinations: list[Path] = []
+    moved_source_dirs: set[Path] = set()
 
     for source in files:
         info = read_track_info(source)
@@ -399,6 +404,7 @@ def organise_music(root: Path, dry_run: bool, copy_only: bool, remove_empty_dirs
                     shutil.copy2(source, final_destination)
                 else:
                     shutil.move(str(source), str(final_destination))
+                    moved_source_dirs.add(source.parent)
             except Exception as exc:
                 print(f"Failed to process {source}: {exc}", file=sys.stderr)
                 continue
@@ -415,8 +421,8 @@ def organise_music(root: Path, dry_run: bool, copy_only: bool, remove_empty_dirs
         except Exception as exc:
             print(f"Failed while handling cover art for {source}: {exc}", file=sys.stderr)
 
-    if remove_empty_dirs and not dry_run and not copy_only:
-        cleanup_empty_dirs(root)
+    if moved_source_dirs and not dry_run and not copy_only and remove_empty_dirs:
+        cleanup_empty_source_dirs(root, moved_source_dirs)
 
     print("\nDone.")
 
@@ -443,7 +449,12 @@ def main() -> None:
     parser.add_argument(
         "--remove-empty-dirs",
         action="store_true",
-        help="Remove empty source folders after moving files.",
+        help="Deprecated: empty source folders are now removed automatically after moving files.",
+    )
+    parser.add_argument(
+        "--keep-empty-dirs",
+        action="store_true",
+        help="Keep empty source folders after moving files.",
     )
 
     args = parser.parse_args()
@@ -462,7 +473,7 @@ def main() -> None:
         root=root,
         dry_run=args.dry_run,
         copy_only=args.copy,
-        remove_empty_dirs=args.remove_empty_dirs,
+        remove_empty_dirs=not args.keep_empty_dirs,
     )
 
 
