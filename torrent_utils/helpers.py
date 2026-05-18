@@ -585,7 +585,7 @@ def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torren
     except Exception as e:
         logging.error(f"qBittorrent injection failed: {e}")
         return
-    if result == "Ok.":
+    if result == "Ok." or (hasattr(result, 'failure_count') and result.failure_count == 0):
         logging.info("Torrent successfully injected.")
     else:
         logging.critical(result)
