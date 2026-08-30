@@ -1327,23 +1327,19 @@ def main():
                 manual_data = _build_manual_data()
             print_huno_payload_preview(manual_data, torrentFileName, source, include_source_mediainfo=bool(source_mediainfo_path))
             if getUserInput("Do you want to upload this to HUNO?"):
-                files_to_open = [
-                    ('desc', desc_path, 'application/json'),
-                    ('mediainfo', mediainfo_path, 'text/plain'),
-                    ('torrent', torrent_path, 'application/x-bittorrent'),
-                ]
-                if source_mediainfo_path and os.path.exists(source_mediainfo_path):
-                    files_to_open.append(('source_mediainfo', source_mediainfo_path, 'text/plain'))
-
-                open_files = [open(p, 'rb') for _, p, _ in files_to_open]
-                try:
+                import contextlib
+                with contextlib.ExitStack() as stack:
+                    desc_f = stack.enter_context(open(desc_path, 'rb'))
+                    mediainfo_f = stack.enter_context(open(mediainfo_path, 'rb'))
+                    torrent_f = stack.enter_context(open(torrent_path, 'rb'))
                     files = {
-                        'torrent': (torrentFileName, open_files[2], 'application/x-bittorrent'),
-                        'description': ('description.txt', open_files[0], 'text/plain'),
-                        'mediainfo': ('mediainfo.txt', open_files[1], 'text/plain'),
+                        'torrent': (torrentFileName, torrent_f, 'application/x-bittorrent'),
+                        'description': ('description.txt', desc_f, 'text/plain'),
+                        'mediainfo': ('mediainfo.txt', mediainfo_f, 'text/plain'),
                     }
-                    if len(open_files) > 3:
-                        files['source_mediainfo'] = ('source_mediainfo.txt', open_files[3], 'text/plain')
+                    if source_mediainfo_path and os.path.exists(source_mediainfo_path):
+                        src_f = stack.enter_context(open(source_mediainfo_path, 'rb'))
+                        files['source_mediainfo'] = ('source_mediainfo.txt', src_f, 'text/plain')
 
                     resp = requests.post(
                         url=HUNO_API_URL,
@@ -1352,9 +1348,6 @@ def main():
                         files=files,
                         timeout=60,
                     )
-                finally:
-                    for f in open_files:
-                        f.close()
                 if resp.status_code == 422:
                     res = resp.json()
                     logging.error(f"HUNO manual upload rejected: {res.get('message')}")
@@ -1393,23 +1386,19 @@ def main():
             upload_succeeded = _do_manual_upload(manual_data)
         elif arg.skipPrompt or getUserInput("Do you want to upload this to HUNO?"):
             try:
-                files_to_open = [
-                    ('desc', desc_path, 'text/plain'),
-                    ('mediainfo', mediainfo_path, 'text/plain'),
-                    ('torrent', torrent_path, 'application/x-bittorrent'),
-                ]
-                if source_mediainfo_path and os.path.exists(source_mediainfo_path):
-                    files_to_open.append(('source_mediainfo', source_mediainfo_path, 'text/plain'))
-
-                open_files = [open(p, 'rb') for _, p, _ in files_to_open]
-                try:
+                import contextlib
+                with contextlib.ExitStack() as stack:
+                    desc_f = stack.enter_context(open(desc_path, 'rb'))
+                    mediainfo_f = stack.enter_context(open(mediainfo_path, 'rb'))
+                    torrent_f = stack.enter_context(open(torrent_path, 'rb'))
                     files = {
-                        'torrent': (torrentFileName, open_files[2], 'application/x-bittorrent'),
-                        'description': ('description.txt', open_files[0], 'text/plain'),
-                        'mediainfo': ('mediainfo.txt', open_files[1], 'text/plain'),
+                        'torrent': (torrentFileName, torrent_f, 'application/x-bittorrent'),
+                        'description': ('description.txt', desc_f, 'text/plain'),
+                        'mediainfo': ('mediainfo.txt', mediainfo_f, 'text/plain'),
                     }
-                    if len(open_files) > 3:
-                        files['source_mediainfo'] = ('source_mediainfo.txt', open_files[3], 'text/plain')
+                    if source_mediainfo_path and os.path.exists(source_mediainfo_path):
+                        src_f = stack.enter_context(open(source_mediainfo_path, 'rb'))
+                        files['source_mediainfo'] = ('source_mediainfo.txt', src_f, 'text/plain')
 
                     response = requests.post(
                         url=HUNO_API_URL,
@@ -1418,9 +1407,6 @@ def main():
                         files=files,
                         timeout=60,
                     )
-                finally:
-                    for f in open_files:
-                        f.close()
                 if response.status_code == 409:
                     result = response.json()
                     logging.warning(f"HUNO upload rejected — duplicate content: {result.get('message')}")
