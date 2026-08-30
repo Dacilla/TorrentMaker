@@ -1067,18 +1067,27 @@ def extract_label(path):
     label = None
     copyright_string = None
     for filename in os.listdir(path):
-        if filename.endswith(".mp3"):
+        lower = filename.lower()
+        if lower.endswith(".mp3"):
             try:
                 audio = EasyID3(os.path.join(path, filename))
                 copyright_string = audio.get('copyright')[0]
                 break
             except Exception:
                 continue
-        elif filename.endswith(".flac"):
+        elif lower.endswith(".flac"):
             try:
                 audio = FLAC(os.path.join(path, filename))
                 copyright_string = audio['copyright'][0]
                 break
+            except Exception:
+                continue
+        elif lower.endswith(".m4a"):
+            try:
+                audio = mutagen.File(os.path.join(path, filename), easy=True)
+                copyright_string = (audio.get('copyright') or [None])[0]
+                if copyright_string:
+                    break
             except Exception:
                 continue
     if copyright_string:
@@ -1124,19 +1133,36 @@ def get_release_year(path):
     release_year = None
     for filename in sorted(os.listdir(path)):
         file_path = os.path.join(path, filename)
-        if filename.lower().endswith(".mp3"):
-            audio = EasyID3(file_path)
-            if 'date' in audio:
-                release_year = int(audio.get('date')[0][:4])
-                return release_year
-        elif filename.lower().endswith(".flac"):
-            audio = FLAC(file_path)
-            if 'year' in audio:
-                release_year = int(audio['year'][0])
-                return release_year
-            elif 'date' in audio:
-                release_year = int(audio['date'][0][:4])
-                return release_year
+        lower = filename.lower()
+        if lower.endswith(".mp3"):
+            try:
+                audio = EasyID3(file_path)
+                if 'date' in audio:
+                    release_year = int(audio.get('date')[0][:4])
+                    return release_year
+            except Exception:
+                continue
+        elif lower.endswith(".flac"):
+            try:
+                audio = FLAC(file_path)
+                if 'year' in audio:
+                    release_year = int(audio['year'][0])
+                    return release_year
+                elif 'date' in audio:
+                    release_year = int(audio['date'][0][:4])
+                    return release_year
+            except Exception:
+                continue
+        elif lower.endswith(".m4a"):
+            try:
+                audio = mutagen.File(file_path, easy=True)
+                if audio:
+                    val = audio.get('date') or audio.get('year')
+                    if val:
+                        parsed = int(str(val[0])[:4])
+                        return parsed
+            except Exception:
+                continue
 
     if release_year is None:
         logging.error("No release year found in any file. Please check the metadata.")
@@ -1145,18 +1171,29 @@ def get_release_year(path):
     return release_year
 
 def get_genre(path):
+    audio = None
     for filename in os.listdir(path):
-        if filename.endswith(".mp3"):
-            audio = EasyID3(os.path.join(path, filename))
-            break
-        elif filename.endswith(".flac"):
-            audio = FLAC(os.path.join(path, filename))
-            break
+        lower = filename.lower()
+        try:
+            if lower.endswith(".mp3"):
+                audio = EasyID3(os.path.join(path, filename))
+                break
+            elif lower.endswith(".flac"):
+                audio = FLAC(os.path.join(path, filename))
+                break
+            elif lower.endswith(".m4a"):
+                audio = mutagen.File(os.path.join(path, filename), easy=True)
+                if audio:
+                    break
+        except Exception:
+            continue
     try:
-        genre = audio['genre'][0]
+        genre = audio['genre'][0] if audio and 'genre' in audio else None
+        if not genre:
+            raise KeyError
         genre = genre.replace('Alternatif et Indé', 'Alternative, Indie')
         genre = genre.replace('Bandes originales de films', 'Stage and Screen')
-    except (KeyError, NameError):
+    except (KeyError, NameError, IndexError, TypeError):
         logging.error("No genre found, please give genres comma separated")
         genre = input()
     return genre.lower()
@@ -1209,17 +1246,26 @@ def get_bitrate_or_lossless(path):
     if not audio_files: return None
     for file_path in audio_files:
         audio = mutagen.File(file_path)
-        if audio:
-            if audio.mime[0] == "audio/mp3":
-                bitrate = audio.info.bitrate // 1000
-                if bitrate in {320, 256, 192}: return str(bitrate)
-            elif audio.mime[0] == "audio/flac":
-                bit_depth = audio.info.bits_per_sample
+        if audio and getattr(audio, "info", None):
+            mime = getattr(audio, "mime", [""])[0] if getattr(audio, "mime", None) else ""
+            if mime == "audio/mp3":
+                bitrate = getattr(audio.info, "bitrate", None)
+                if bitrate:
+                    kbps = int(round(bitrate / 1000))
+                    for accepted in (320, 256, 192):
+                        if abs(kbps - accepted) <= 2:
+                            return str(accepted)
+            elif mime == "audio/flac":
+                bit_depth = getattr(audio.info, "bits_per_sample", None)
                 if bit_depth == 16: return "Lossless"
                 if bit_depth == 24: return "24bit Lossless"
-            elif audio.mime[0] in ("audio/mp4", "audio/aac"):
-                bitrate = audio.info.bitrate // 1000
-                if bitrate in {320, 256, 192}: return str(bitrate)
+            elif mime in ("audio/mp4", "audio/aac"):
+                bitrate = getattr(audio.info, "bitrate", None)
+                if bitrate:
+                    kbps = int(round(bitrate / 1000))
+                    for accepted in (320, 256, 192):
+                        if abs(kbps - accepted) <= 2:
+                            return str(accepted)
     return None
 
 def check_file_path_length(folder_path):
@@ -1244,8 +1290,8 @@ def convert_roles_to_int(roles_list):
 
 def get_first_song_album(folder_path):
     for file_name in sorted(os.listdir(folder_path)):
-        if file_name.endswith((".mp3", ".flac")):
-            audio = mutagen.File(os.path.join(folder_path, file_name))
+        if file_name.lower().endswith((".mp3", ".flac", ".m4a")):
+            audio = mutagen.File(os.path.join(folder_path, file_name), easy=True)
             if audio and 'album' in audio:
                 return audio['album'][0]
     return None
@@ -1261,8 +1307,8 @@ def print_all_metadata(file_path):
 
 def get_first_song_artist(folder_path):
     for file_name in sorted(os.listdir(folder_path)):
-        if file_name.endswith((".mp3", ".flac")):
-            audio = mutagen.File(os.path.join(folder_path, file_name))
+        if file_name.lower().endswith((".mp3", ".flac", ".m4a")):
+            audio = mutagen.File(os.path.join(folder_path, file_name), easy=True)
             if audio:
                 if 'albumartist' in audio: return audio['albumartist'][0]
                 if 'artist' in audio: return audio['artist'][0]
