@@ -10,7 +10,7 @@ from typing import Any, Iterable
 import mutagen
 
 
-AUDIO_EXTENSIONS = {".mp3", ".flac"}
+AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a"}
 COVER_NAMES = ("cover.jpg", "cover.jpeg", "cover.png")
 LOG_EXTENSIONS = {".log", ".cue"}
 WEB_MEDIA = {"WEB"}
@@ -196,11 +196,15 @@ def _format_from_file(file_path: str, audio: Any) -> str | None:
         return "FLAC"
     if ext == ".mp3":
         return "MP3"
+    if ext == ".m4a":
+        return "AAC"
     mime = getattr(audio, "mime", [""])[0] if audio else ""
     if mime == "audio/flac":
         return "FLAC"
     if mime == "audio/mp3":
         return "MP3"
+    if mime in ("audio/mp4", "audio/aac"):
+        return "AAC"
     return None
 
 
@@ -213,7 +217,7 @@ def _bitrate_from_audio(audio_format: str | None, audio: Any) -> str | None:
         if bits == 24:
             return "24bit Lossless"
         return None
-    if audio_format == "MP3":
+    if audio_format in ("MP3", "AAC"):
         bitrate = getattr(info, "bitrate", None)
         if bitrate:
             kbps = int(round(bitrate / 1000))
@@ -478,6 +482,8 @@ def build_red_payload(
         payload.append(("remaster_record_label", metadata.record_label))
     elif metadata.edition_year:
         payload.append(("remaster_year", metadata.edition_year))
+    else:
+        payload.append(("remaster_year", metadata.year))
     payload.extend(_artist_fields(metadata.artist))
     return payload
 
@@ -516,6 +522,8 @@ def build_ops_payload(
         ))
     elif metadata.edition_year:
         payload.extend((("remaster", 1), ("remaster_year", metadata.edition_year)))
+    else:
+        payload.append(("remaster_year", metadata.year))
     payload.extend(_artist_fields(metadata.artist))
     return payload
 

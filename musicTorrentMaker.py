@@ -31,6 +31,7 @@ from concurrent import futures
 from torrent_utils.helpers import (
     has_folders, make_torrent_progress_callback, uploadToPTPIMG, copy_folder_structure,
     getUserInput as _getUserInput, qbitInject, similarity, get_path_list, ensure_flac_cli,
+    upload_to_hawkepics, upload_to_onlyimage, upload_to_imgbb, upload_to_catbox,
 )
 from torrent_utils.config_loader import load_settings, validate_settings
 from torrent_utils.music_upload import (
@@ -89,6 +90,50 @@ def prepend_description(description: str, prefix: str | None = None) -> str:
     if not prefix:
         return description
     return f"{prefix}\n\n{description}" if description else prefix
+
+
+def _upload_cover_with_fallback(
+    cover_path: str,
+    hawkepics_api: str | None,
+    ptpimg_api: str | None,
+    onlyimage_api: str | None,
+    imgbb_api: str | None,
+    catbox_hash: str | None,
+) -> str | None:
+    """Upload cover image using the fallback chain: hawkepics -> PTPImg -> OnlyImage -> ImgBB -> Catbox."""
+    image_name = os.path.basename(cover_path)
+
+    if hawkepics_api:
+        image_url = upload_to_hawkepics(cover_path, hawkepics_api)
+        if image_url:
+            logging.info(f"Successfully uploaded {image_name} to hawke.pics.")
+            return image_url
+
+    if ptpimg_api:
+        image_url = uploadToPTPIMG(cover_path, ptpimg_api)
+        if image_url:
+            logging.info(f"Successfully uploaded {image_name} to PTPImg.")
+            return image_url
+
+    if onlyimage_api:
+        image_url = upload_to_onlyimage(cover_path, onlyimage_api)
+        if image_url:
+            logging.info(f"Successfully uploaded {image_name} to OnlyImage.")
+            return image_url
+
+    if imgbb_api:
+        image_url, _ = upload_to_imgbb(cover_path, imgbb_api)
+        if image_url:
+            logging.info(f"Successfully uploaded {image_name} to ImgBB.")
+            return image_url
+
+    if catbox_hash:
+        image_url = upload_to_catbox(cover_path, catbox_hash)
+        if image_url:
+            logging.info(f"Successfully uploaded {image_name} to Catbox.")
+            return image_url
+
+    return None
 
 
 def first_duplicate_group_id(duplicates):
@@ -334,6 +379,10 @@ def main():
     qbit_password = settings.get('QBIT_PASSWORD')
     qbit_host = settings.get('QBIT_HOST')
     ptpimg_api = settings.get('PTPIMG_API')
+    hawkepics_api = settings.get('HAWKEPICS_API')
+    onlyimage_api = settings.get('ONLYIMAGE_API')
+    imgbb_api = settings.get('IMGBB_API')
+    catbox_hash = settings.get('CATBOX_HASH')
     red_announce_url = settings.get('RED_ANNOUNCE_URL')
     red_api = settings.get('RED_API')
     ops_announce_url = settings.get('OPS_ANNOUNCE_URL')
@@ -350,6 +399,14 @@ def main():
 
     if ptpimg_api == '':
         ptpimg_api = None
+    if hawkepics_api == '':
+        hawkepics_api = None
+    if onlyimage_api == '':
+        onlyimage_api = None
+    if imgbb_api == '':
+        imgbb_api = None
+    if catbox_hash == '':
+        catbox_hash = None
     # --- END Settings Section ---
 
     pathList = get_path_list(arg.path, BULK_DOWNLOAD_FILE)
@@ -509,7 +566,8 @@ def main():
 
         # Upload cover art
         coverImgURL = ""
-        if ptpimg_api:
+        any_image_api = ptpimg_api or hawkepics_api or onlyimage_api or imgbb_api or catbox_hash
+        if any_image_api:
             cover = None
             if scan.cover_path:
                 cover = scan.cover_path
@@ -521,7 +579,7 @@ def main():
                     cover = extract_album_art(discsArr[0])
                 else:
                     cover = extract_album_art(path)
-            
+
             if not cover:
                 logging.error("Could not find or extract a cover image for this album.")
                 if getUserInput("A cover image is required for uploads. Do you want to provide a path to the cover image now?"):
@@ -532,10 +590,12 @@ def main():
                 else:
                     logging.error("Exiting because no cover image is available.")
                     sys.exit(1)
-            
+
             while True:
                 logging.info(f"Uploading cover image: {cover}")
-                coverImgURL = uploadToPTPIMG(cover, ptpimg_api)
+                coverImgURL = _upload_cover_with_fallback(
+                    cover, hawkepics_api, ptpimg_api, onlyimage_api, imgbb_api, catbox_hash
+                )
                 if coverImgURL:
                     with open(os.path.join(runDir, "coverImgURL.txt"), 'w') as file:
                         file.write(coverImgURL)
@@ -752,7 +812,7 @@ def _has_audio_files(path: str, recursive: bool = False) -> bool:
     walker = os.walk(path) if recursive else [(path, [], os.listdir(path) if os.path.isdir(path) else [])]
     for _, _, files in walker:
         for file_name in files:
-            if file_name.lower().endswith((".mp3", ".flac")):
+            if file_name.lower().endswith((".mp3", ".flac", ".m4a")):
                 return True
     return False
 
@@ -1108,15 +1168,16 @@ def detect_audio_format(path):
             ext = os.path.splitext(filename)[1].lower()
             if ext in {'.mp3', '.mp2', '.mpga'}: return "MP3"
             if ext in {'.flac'}: return "FLAC"
+            if ext in {'.m4a'}: return "AAC"
     return None
 
 def get_album_type(folder_path):
     audio_files = []
     if isinstance(folder_path, list):
         for path in folder_path:
-            audio_files.extend([os.path.join(path, f) for f in os.listdir(path) if f.endswith(('.mp3', '.flac'))])
+            audio_files.extend([os.path.join(path, f) for f in os.listdir(path) if f.endswith(('.mp3', '.flac', '.m4a'))])
     else:
-        audio_files.extend([os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.mp3', '.flac'))])
+        audio_files.extend([os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.mp3', '.flac', '.m4a'))])
 
     if not audio_files: raise ValueError(f"No audio files found in {folder_path}")
 
@@ -1139,7 +1200,7 @@ def get_audio_files(path):
     audio_files = []
     for root, dirs, files in os.walk(path):
         for file in files:
-            if file.endswith((".mp3", ".flac")):
+            if file.endswith((".mp3", ".flac", ".m4a")):
                 audio_files.append(os.path.join(root, file))
     return audio_files
 
@@ -1156,6 +1217,9 @@ def get_bitrate_or_lossless(path):
                 bit_depth = audio.info.bits_per_sample
                 if bit_depth == 16: return "Lossless"
                 if bit_depth == 24: return "24bit Lossless"
+            elif audio.mime[0] in ("audio/mp4", "audio/aac"):
+                bitrate = audio.info.bitrate // 1000
+                if bitrate in {320, 256, 192}: return str(bitrate)
     return None
 
 def check_file_path_length(folder_path):
@@ -1246,7 +1310,7 @@ def check_missing_tracks(directory):
     return missing_tracks
 
 def add_track_position(folder_path):
-    music_files = sorted([f for f in os.listdir(folder_path) if f.endswith(('.mp3', '.wav', '.flac'))])
+    music_files = sorted([f for f in os.listdir(folder_path) if f.endswith(('.mp3', '.wav', '.flac', '.m4a'))])
     for i, file_name in enumerate(music_files):
         if not file_name[:2].isdigit():
             track_position = str(i + 1).zfill(2)
@@ -1259,9 +1323,9 @@ def create_track_list(folder_path, output_file):
     track_list = []
     
     def process_folder(path, disc_prefix=""):
-        music_files = sorted([f for f in os.listdir(path) if f.endswith(('.mp3', '.wav', '.flac'))])
+        music_files = sorted([f for f in os.listdir(path) if f.endswith(('.mp3', '.wav', '.flac', '.m4a'))])
         for i, file_name in enumerate(music_files):
-            audio = mutagen.File(os.path.join(path, file_name))
+            audio = mutagen.File(os.path.join(path, file_name), easy=True)
             track_length = int(audio.info.length)
             minutes, seconds = divmod(track_length, 60)
             track_length_str = f"{int(minutes):02d}:{int(seconds):02d}"
