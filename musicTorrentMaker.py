@@ -67,6 +67,7 @@ def tracker_torrent_filename(base_name: str, tracker_source: str | None = None) 
 def create_torrent_file(content_path: str, run_dir: str, torrent_file_name: str, announce_url: str | None = None, source: str | None = None, tracker_label: str = "local") -> str:
     torrent = torf.Torrent()
     torrent.private = True
+    torrent.piece_size_max = 4 * 1024 * 1024
     if source:
         torrent.source = source
     if announce_url:
