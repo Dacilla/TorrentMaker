@@ -359,9 +359,9 @@ def main():
     
     required_settings = []
     if arg.upload:
-        required_settings.extend(['RED_API', 'RED_ANNOUNCE_URL', 'PTPIMG_API'])
+        required_settings.extend(['RED_API', 'RED_ANNOUNCE_URL'])
     if arg.ops:
-        required_settings.extend(['OPS_API', 'OPS_ANNOUNCE_URL', 'PTPIMG_API'])
+        required_settings.extend(['OPS_API', 'OPS_ANNOUNCE_URL'])
     if arg.inject:
         required_settings.extend(['QBIT_HOST', 'QBIT_USERNAME', 'QBIT_PASSWORD'])
     if arg.sbcopy:
@@ -373,6 +373,15 @@ def main():
         required_settings.append('SEEDING_DIR')
 
     validate_settings(settings, required_settings)
+
+    # Validate image host: at least one must be configured for uploads
+    if (arg.upload or arg.ops) and not arg.preflight:
+        has_image_host = any(
+            settings.get(k) for k in ('HAWKEPICS_API', 'PTPIMG_API', 'ONLYIMAGE_API', 'IMGBB_API', 'CATBOX_HASH')
+        )
+        if not has_image_host:
+            logging.error("No image host API configured (need HAWKEPICS_API, PTPIMG_API, ONLYIMAGE_API, IMGBB_API or CATBOX_HASH)")
+            sys.exit("Please configure at least one image host in settings.ini.")
     
     # Assign settings to variables
     qbit_username = settings.get('QBIT_USERNAME')
@@ -1043,25 +1052,41 @@ def extract_album_art(folder_path):
     return None
 
 def fixMD5(folder_path):
-    os.chdir(folder_path)
-    command = ['flac', '-f8', '*.flac']
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, shell=True)
-    for line in process.stdout:
-        print(line, end='')
+    import glob
+    flac_files = glob.glob(os.path.join(folder_path, "*.flac"))
+    if not flac_files:
+        logging.info(f"No FLAC files to fix in {folder_path}")
+        return
+    command = ['flac', '-f', '-8'] + flac_files
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        if process.stdout:
+            for line in process.stdout:
+                print(line, end='')
+        process.wait()
+    except FileNotFoundError:
+        logging.error("FLAC executable not found. Ensure FLAC is installed.")
+        return
     for root, dirs, files in os.walk(folder_path):
         for file in files:
             if '.tmp' in file:
                 file_path = os.path.join(root, file)
-                os.remove(file_path)
-                logging.info(f"Deleted file: {file_path}")
+                try:
+                    os.remove(file_path)
+                    logging.info(f"Deleted file: {file_path}")
+                except OSError as e:
+                    logging.warning(f"Could not delete temp file {file_path}: {e}")
 
 def find_disc_folders(folder_path):
     disc_folders = []
-    for root, dirs, files in os.walk(folder_path):
-        for dir_name in dirs:
-            if dir_name.startswith('Disc'):
-                disc_folders.append(os.path.join(root, dir_name))
-    return disc_folders
+    try:
+        for entry in os.listdir(folder_path):
+            full = os.path.join(folder_path, entry)
+            if os.path.isdir(full) and entry.startswith('Disc'):
+                disc_folders.append(full)
+    except OSError:
+        pass
+    return sorted(disc_folders)
 
 def extract_label(path):
     label = None

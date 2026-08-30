@@ -482,14 +482,14 @@ def uploadToPTPIMG(imageFile: str, api_key: str):
     """Uploads an image to PTPImg with robust error handling."""
     try:
         with open(imageFile, 'rb') as f:
-            file_payload = {"file-upload[0]": f.read()}
+            file_payload = {"file-upload[0]": (os.path.basename(imageFile), f, "application/octet-stream")}
 
-        response = requests.post(
-            url="https://ptpimg.me/upload.php",
-            data={"api_key": api_key},
-            files=file_payload,
-            timeout=30,
-        )
+            response = requests.post(
+                url="https://ptpimg.me/upload.php",
+                data={"api_key": api_key},
+                files=file_payload,
+                timeout=30,
+            )
         response.raise_for_status()
 
         response_data = response.json()
@@ -601,9 +601,11 @@ def FileOrFolder(path: str):
 
 def is_valid_torf_hash(hash_str):
     """Checks if a string is a valid SHA-1 hash value for torf."""
+    if not hash_str:
+        return False
     try:
         hash_bytes = bytes.fromhex(hash_str)
-        if len(hash_bytes) % 20 != 0:
+        if len(hash_bytes) == 0 or len(hash_bytes) % 20 != 0:
             return False
         return True
     except (ValueError, TypeError):
@@ -622,7 +624,7 @@ def upload_to_imgbb(file_path: str, apiKey: str):
         with open(file_path, "rb") as imagefile:
             payload = {
                 "key": apiKey,
-                "image": b64encode(imagefile.read()),
+                "image": b64encode(imagefile.read()).decode("ascii"),
             }
         response = requests.post(api_endpoint, payload, timeout=20)
         response.raise_for_status()

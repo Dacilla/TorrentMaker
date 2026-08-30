@@ -33,8 +33,7 @@ class TestIsValidTorfHash:
 
     def test_empty_string(self):
         from torrent_utils.helpers import is_valid_torf_hash
-        # Empty string: bytes.fromhex("") = b"", len=0, 0 % 20 == 0 → True
-        assert is_valid_torf_hash("") is True
+        assert is_valid_torf_hash("") is False
 
 
 # ---------------------------------------------------------------------------

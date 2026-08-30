@@ -91,7 +91,7 @@ STREAMING_SERVICES = {
     'stan': 'STAN',
     'crav': 'CRAV',
     'cr': 'CR',
-    'itunes': 'iTunes', 'itunes': 'iT',
+    'itunes': 'iT',
 }
 
 # HUNO type_id values
