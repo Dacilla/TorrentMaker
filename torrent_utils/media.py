@@ -240,7 +240,13 @@ class MediaFile:
                 main_channels = channels_num - 1
                 channel_str = f"{main_channels}.1"
             else:
-                channel_str = f"{channels_num}.0"
+                # MediaInfo may omit ChannelLayout for AAC/Opus; infer common layouts
+                if channels_num == 6:
+                    channel_str = "5.1"
+                elif channels_num == 8:
+                    channel_str = "7.1"
+                else:
+                    channel_str = f"{channels_num}.0"
         except (ValueError, TypeError):
             channel_str = f"{channels_num_str}.0"
 

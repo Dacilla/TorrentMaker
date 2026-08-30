@@ -29,9 +29,9 @@ from tqdm import tqdm
 from concurrent import futures
 
 from torrent_utils.helpers import (
-    has_folders, make_torrent_progress_callback, uploadToPTPIMG, copy_folder_structure,
+    has_folders, make_torrent_progress_callback, copy_folder_structure,
     getUserInput as _getUserInput, qbitInject, similarity, get_path_list, ensure_flac_cli,
-    upload_to_hawkepics, upload_to_onlyimage, upload_to_imgbb, upload_to_catbox,
+    upload_image_with_fallback,
 )
 from torrent_utils.config_loader import load_settings, validate_settings
 from torrent_utils.music_upload import (
@@ -101,39 +101,14 @@ def _upload_cover_with_fallback(
     catbox_hash: str | None,
 ) -> str | None:
     """Upload cover image using the fallback chain: hawkepics -> PTPImg -> OnlyImage -> ImgBB -> Catbox."""
-    image_name = os.path.basename(cover_path)
-
-    if hawkepics_api:
-        image_url = upload_to_hawkepics(cover_path, hawkepics_api)
-        if image_url:
-            logging.info(f"Successfully uploaded {image_name} to hawke.pics.")
-            return image_url
-
-    if ptpimg_api:
-        image_url = uploadToPTPIMG(cover_path, ptpimg_api)
-        if image_url:
-            logging.info(f"Successfully uploaded {image_name} to PTPImg.")
-            return image_url
-
-    if onlyimage_api:
-        image_url = upload_to_onlyimage(cover_path, onlyimage_api)
-        if image_url:
-            logging.info(f"Successfully uploaded {image_name} to OnlyImage.")
-            return image_url
-
-    if imgbb_api:
-        image_url, _ = upload_to_imgbb(cover_path, imgbb_api)
-        if image_url:
-            logging.info(f"Successfully uploaded {image_name} to ImgBB.")
-            return image_url
-
-    if catbox_hash:
-        image_url = upload_to_catbox(cover_path, catbox_hash)
-        if image_url:
-            logging.info(f"Successfully uploaded {image_name} to Catbox.")
-            return image_url
-
-    return None
+    return upload_image_with_fallback(
+        cover_path,
+        hawkepics_api=hawkepics_api,
+        ptpimg_api=ptpimg_api,
+        onlyimage_api=onlyimage_api,
+        imgbb_api=imgbb_api,
+        catbox_hash=catbox_hash,
+    )
 
 
 def first_duplicate_group_id(duplicates):
@@ -525,26 +500,30 @@ def main():
         
         # Create a unique directory for this run's output files
         if not os.path.isdir("runs"):
-            os.mkdir("runs")
-            os.mkdir(f"runs{os.sep}001")
+            os.makedirs("runs", exist_ok=True)
+            os.makedirs(f"runs{os.sep}001", exist_ok=True)
             runDir = os.getcwd() + os.sep + "runs" + os.sep + "001" + os.sep
         elif not has_folders("runs"):
-            os.mkdir(f"runs{os.sep}001")
+            os.makedirs(f"runs{os.sep}001", exist_ok=True)
             runDir = os.getcwd() + os.sep + "runs" + os.sep + "001" + os.sep
         else:
-            fileList = os.listdir("runs")
-            maxValue = max(int(dirname) for dirname in fileList)
-            logging.info("Last run number found: " + str(maxValue))
-            maxValue = maxValue + 1
-            maxValue = str(maxValue).zfill(3)
-            while True:
-                try:
-                    os.mkdir("runs" + os.sep + maxValue)
-                    break
-                except FileExistsError:
-                    logging.error("Folder exists. Adding one and trying again...")
-                    maxValue = str(int(maxValue) + 1)
-            runDir = os.getcwd() + os.sep + "runs" + os.sep + maxValue + os.sep
+            fileList = [d for d in os.listdir("runs") if d.isdigit()]
+            if not fileList:
+                os.makedirs(f"runs{os.sep}001", exist_ok=True)
+                runDir = os.getcwd() + os.sep + "runs" + os.sep + "001" + os.sep
+            else:
+                maxValue = max(int(dirname) for dirname in fileList)
+                logging.info("Last run number found: " + str(maxValue))
+                maxValue = maxValue + 1
+                maxValue = str(maxValue).zfill(3)
+                while True:
+                    try:
+                        os.mkdir("runs" + os.sep + maxValue)
+                        break
+                    except FileExistsError:
+                        logging.error("Folder exists. Adding one and trying again...")
+                        maxValue = str(int(maxValue) + 1)
+                runDir = os.getcwd() + os.sep + "runs" + os.sep + maxValue + os.sep
 
         logging.info("Run directory: " + runDir)
         logging.info(f"Created folder for output in {os.path.relpath(runDir)}")

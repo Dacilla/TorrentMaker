@@ -12,7 +12,10 @@ import numpy as np
 import zipfile
 import platform
 import subprocess
-import winsound
+try:
+    import winsound
+except ImportError:
+    winsound = None
 import uuid
 import contextlib
 import time
@@ -405,6 +408,8 @@ def play_alert(kind: str = "input"):
     if _terminal_is_focused():
         return
     _last_alert_time = now
+    if winsound is None:
+        return
     try:
         if kind == "done":
             winsound.MessageBeep(winsound.MB_ICONASTERISK)
@@ -554,10 +559,49 @@ def upload_to_hawkepics(file_path: str, api_key: str):
         logging.error(f"hawke.pics returned invalid data for {os.path.basename(file_path)}: {e}")
         return None
 
+
+def upload_image_with_fallback(
+    file_path: str,
+    hawkepics_api: str | None = None,
+    ptpimg_api: str | None = None,
+    onlyimage_api: str | None = None,
+    imgbb_api: str | None = None,
+    catbox_hash: str | None = None,
+) -> str | None:
+    """Upload an image trying hawke.pics -> PTPImg -> OnlyImage -> ImgBB -> Catbox in order.
+    Returns the URL string on success or None if all hosts fail."""
+    image_name = os.path.basename(file_path)
+    if hawkepics_api:
+        url = upload_to_hawkepics(file_path, hawkepics_api)
+        if url:
+            logging.info(f"Successfully uploaded {image_name} to hawke.pics.")
+            return url
+    if ptpimg_api:
+        url = uploadToPTPIMG(file_path, ptpimg_api)
+        if url:
+            logging.info(f"Successfully uploaded {image_name} to PTPImg.")
+            return url
+    if onlyimage_api:
+        url = upload_to_onlyimage(file_path, onlyimage_api)
+        if url:
+            logging.info(f"Successfully uploaded {image_name} to OnlyImage.")
+            return url
+    if imgbb_api:
+        url, _ = upload_to_imgbb(file_path, imgbb_api)
+        if url:
+            logging.info(f"Successfully uploaded {image_name} to ImgBB.")
+            return url
+    # Catbox is the final fallback and works anonymously if no hash is configured
+    url = upload_to_catbox(file_path, catbox_hash if catbox_hash else None)
+    if url:
+        logging.info(f"Successfully uploaded {image_name} to Catbox.")
+        return url
+    return None
+
 def copy_folder_structure(src_path, dst_path):
     # Create the destination folder if it doesn't exist
     if not os.path.exists(dst_path):
-        os.makedirs(dst_path)
+        os.makedirs(dst_path, exist_ok=True)
 
     # Iterate over all the files and folders in the source path
     for item in os.listdir(src_path):
@@ -569,6 +613,17 @@ def copy_folder_structure(src_path, dst_path):
                 os.link(src_item_path, dst_item_path)
             except FileExistsError:
                 continue
+            except OSError as e:
+                # Cross-device link fails on different filesystems; fall back to copy
+                if getattr(e, 'errno', None) == 18:
+                    try:
+                        shutil.copy2(src_item_path, dst_item_path)
+                    except FileExistsError:
+                        continue
+                    except OSError as copy_e:
+                        logging.warning(f"Failed to copy {src_item_path} to {dst_item_path}: {copy_e}")
+                else:
+                    logging.warning(f"Failed to link {src_item_path} to {dst_item_path}: {e}")
         # If the item is a folder, recursively copy its contents
         elif os.path.isdir(src_item_path):
             copy_folder_structure(src_item_path, dst_item_path)
@@ -577,18 +632,24 @@ def qbitInject(qbit_host, qbit_username, qbit_password, category, runDir, torren
     import qbittorrentapi
     logging.info("Logging in to qbit...")
     qb = qbittorrentapi.Client(qbit_host, username=qbit_username, password=qbit_password, REQUESTS_ARGS={'timeout': (60, 60)})
-    logging.info("Logged in to qbit")
-    torrent_file = os.path.join(runDir, torrentFileName)
-    logging.info(f"Injecting {torrent_file} to qbit...")
     try:
-        result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category=category, tags="Self-Upload", rename=postName, seeding_time_limit=seedTimeLimit)
-    except Exception as e:
-        logging.error(f"qBittorrent injection failed: {e}")
-        return
-    if result == "Ok." or (hasattr(result, 'failure_count') and result.failure_count == 0):
-        logging.info("Torrent successfully injected.")
-    else:
-        logging.critical(result)
+        logging.info("Logged in to qbit")
+        torrent_file = os.path.join(runDir, torrentFileName)
+        logging.info(f"Injecting {torrent_file} to qbit...")
+        try:
+            result = qb.torrents_add(is_skip_checking=True, torrent_files=torrent_file, is_paused=paused, category=category, tags="Self-Upload", rename=postName, seeding_time_limit=seedTimeLimit)
+        except Exception as e:
+            logging.error(f"qBittorrent injection failed: {e}")
+            return
+        if result == "Ok." or (hasattr(result, 'failure_count') and result.failure_count == 0):
+            logging.info("Torrent successfully injected.")
+        else:
+            logging.critical(result)
+    finally:
+        try:
+            qb.auth_log_out()
+        except Exception:
+            pass
 
 def FileOrFolder(path: str):
     # returns 1 if file, 2 if folder, 0 if neither

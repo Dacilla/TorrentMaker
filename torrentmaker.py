@@ -1701,43 +1701,19 @@ def optimize_screenshot(input_path, output_path, max_width=1920, quality=85):
         shutil.copy(input_path, output_path)
 
 def upload_single_screenshot(image_path, hawkepics_api, imgbb_api, ptpimg_api, catbox_hash, onlyimage_api=None):
+    from torrent_utils.helpers import upload_image_with_fallback
     image_name = os.path.basename(image_path)
     logging.info(f"Uploading {image_name}...")
-
-    # --- Attempt 1: hawke.pics (if API key is provided) ---
-    if hawkepics_api:
-        image_url = upload_to_hawkepics(image_path, hawkepics_api)
-        if image_url:
-            logging.info(f"Success: Successfully uploaded {image_name} to hawke.pics.")
-            return f"[url={image_url}][img]{image_url}[/img][/url]"
-
-    # --- Attempt 2: PTPImg (if API key is provided) ---
-    if ptpimg_api:
-        image_url = uploadToPTPIMG(image_path, ptpimg_api)
-        if image_url:
-            logging.info(f"Success: Successfully uploaded {image_name} to PTPImg.")
-            return f"[url={image_url}][img]{image_url}[/img][/url]"
-
-    # --- Attempt 3: OnlyImage (if API key is provided) ---
-    if onlyimage_api:
-        image_url = upload_to_onlyimage(image_path, onlyimage_api)
-        if image_url:
-            logging.info(f"Success: Successfully uploaded {image_name} to OnlyImage.")
-            return f"[url={image_url}][img]{image_url}[/img][/url]"
-
-    # --- Attempt 4: ImgBB (if API key is provided) ---
-    if imgbb_api:
-        image_url, _ = upload_to_imgbb(image_path, imgbb_api) # We only need the direct URL
-        if image_url:
-            logging.info(f"Success: Successfully uploaded {image_name} to ImgBB.")
-            return f"[url={image_url}][img]{image_url}[/img][/url]"
-
-    # --- Attempt 5: Catbox (fallback) ---
-    image_url = upload_to_catbox(image_path, catbox_hash)
+    image_url = upload_image_with_fallback(
+        image_path,
+        hawkepics_api=hawkepics_api,
+        ptpimg_api=ptpimg_api,
+        onlyimage_api=onlyimage_api,
+        imgbb_api=imgbb_api,
+        catbox_hash=catbox_hash,
+    )
     if image_url:
-        logging.info(f"Success: Successfully uploaded {image_name} to Catbox.")
         return f"[url={image_url}][img]{image_url}[/img][/url]"
-
     logging.error(f"Failure: All upload methods failed for {image_name}.")
     return None
 

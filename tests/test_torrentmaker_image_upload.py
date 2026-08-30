@@ -9,8 +9,11 @@ def test_upload_single_screenshot_uses_hawkepics_before_ptpimg(tmp_path):
     img.write_bytes(b"\x89PNG\r\n")
 
     with (
-        patch("torrentmaker.upload_to_hawkepics", return_value="https://hawke.pics/image/abc.png") as hawke,
-        patch("torrentmaker.uploadToPTPIMG", return_value="https://ptpimg.me/abc.png") as ptpimg,
+        patch("torrent_utils.helpers.upload_to_hawkepics", return_value="https://hawke.pics/image/abc.png") as hawke,
+        patch("torrent_utils.helpers.uploadToPTPIMG", return_value="https://ptpimg.me/abc.png") as ptpimg,
+        patch("torrent_utils.helpers.upload_to_onlyimage", return_value=None),
+        patch("torrent_utils.helpers.upload_to_imgbb", return_value=(None, None)),
+        patch("torrent_utils.helpers.upload_to_catbox", return_value=None),
     ):
         bbcode = upload_single_screenshot(
             str(img),
@@ -32,8 +35,11 @@ def test_upload_single_screenshot_falls_back_to_ptpimg_after_hawkepics_failure(t
     img.write_bytes(b"\x89PNG\r\n")
 
     with (
-        patch("torrentmaker.upload_to_hawkepics", return_value=None) as hawke,
-        patch("torrentmaker.uploadToPTPIMG", return_value="https://ptpimg.me/abc.png") as ptpimg,
+        patch("torrent_utils.helpers.upload_to_hawkepics", return_value=None) as hawke,
+        patch("torrent_utils.helpers.uploadToPTPIMG", return_value="https://ptpimg.me/abc.png") as ptpimg,
+        patch("torrent_utils.helpers.upload_to_onlyimage", return_value=None),
+        patch("torrent_utils.helpers.upload_to_imgbb", return_value=(None, None)),
+        patch("torrent_utils.helpers.upload_to_catbox", return_value=None),
     ):
         bbcode = upload_single_screenshot(
             str(img),
