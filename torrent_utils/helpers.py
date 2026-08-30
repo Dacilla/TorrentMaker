@@ -141,7 +141,12 @@ def ensure_mediainfo_cli():
     """
     Checks if MediaInfo CLI is available. If not, prompts the user to install it.
     """
-    if shutil.which("mediainfo") or os.path.exists(os.path.join("Mediainfo", "mediainfo.exe")):
+    local_candidates = [
+        os.path.join("Mediainfo", "mediainfo.exe"),
+        os.path.join("MediaInfo", "MediaInfo.exe"),
+        os.path.join("Mediainfo", "MediaInfo.exe"),
+    ]
+    if shutil.which("mediainfo") or any(os.path.exists(p) for p in local_candidates):
         logging.info("MediaInfo CLI found.")
         return
 
